@@ -1,0 +1,45 @@
+name: Publish Linux release
+on:
+  workflow_dispatch:
+    inputs:
+      build_run_id:
+        description: Successful Linux packages run to publish
+        required: true
+        type: string
+      release_tag:
+        description: Existing draft release tag
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: write
+concurrency:
+  group: publish-linux-${{ inputs.release_tag }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      BUILD_RUN_ID: ${{ inputs.build_run_id }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - name: Validate source build and draft release
+        run: |
+          set -euo pipefail
+          test "$(gh run view "$BUILD_RUN_ID" --json conclusion --jq '.conclusion')" = success
+          test "$(gh release view "$RELEASE_TAG" --json isDraft --jq '.isDraft')" = true
+          build_commit=$(gh run view "$BUILD_RUN_ID" --json headSha --jq '.headSha')
+          release_commit=$(gh release view "$RELEASE_TAG" --json targetCommitish --jq '.targetCommitish')
+          test "$build_commit" = "$release_commit"
+      - name: Download verified Linux packages
+        run: gh run download "$BUILD_RUN_ID" --name WPS5-Linux-x86_64 --dir packages
+      - name: Check package hashes
+        working-directory: packages
+        run: sha256sum -c SHA256SUMS
+      - name: Upload packages and publish prerelease
+        run: |
+          gh release upload "$RELEASE_TAG" packages/*.AppImage packages/*.flatpak packages/SHA256SUMS --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease
