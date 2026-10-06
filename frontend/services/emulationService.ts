@@ -12,6 +12,14 @@ import {
 import { isPsnEligiblePlatform } from './psnMetadataService';
 import { fetchSteamGridData } from './steamGridService';
 
+export const pathKey = (p: string): string =>
+  (typeof window !== 'undefined' && (window as any).electronAPI?.platform === 'linux') ? p : p.toLowerCase();
+
+const quoteRomArgument = (rom: string): string => {
+  const linux = typeof window !== 'undefined' && (window as any).electronAPI?.platform === 'linux';
+  return linux ? JSON.stringify(rom) : '"' + rom + '"';
+};
+
 export type EmulatorId = 'ps1' | 'ps2' | 'ps3' | 'psp' | 'gcwii' | 'retroarch' | 'switch';
 
 export interface EmulatorDef {
@@ -47,11 +55,11 @@ export const EMULATORS: EmulatorDef[] = [
     id: 'ps1',
     name: 'PlayStation 1',
     emulatorName: 'DuckStation',
-    exeNames: ['duckstation-qt-x64-releaseltcg.exe', 'duckstation-qt.exe', 'duckstation.exe'],
+    exeNames: ['duckstation-qt', 'duckstation', 'duckstation-qt-x64-releaseltcg.exe', 'duckstation-qt.exe', 'duckstation.exe'],
     romExtensions: ['.cue', '.bin', '.chd', '.iso', '.pbp', '.m3u', '.ecm', '.img', '.ccd', '.mdf', '.mds', '.nrg', '.toc', '.cbn'],
     biosPatterns: ['scph1001', 'scph5500', 'scph5501', 'scph5502'],
     platform: 'PS1',
-    launchArgs: (rom) => `-batch -fullscreen "${rom}"`,
+    launchArgs: (rom) => `-batch -fullscreen ${quoteRomArgument(rom)}`,
     downloadUrl: 'https://www.duckstation.org/',
   image: require('@/assets/images/consolas/psx.png'),
   },
@@ -59,11 +67,11 @@ export const EMULATORS: EmulatorDef[] = [
     id: 'ps2',
     name: 'PlayStation 2',
     emulatorName: 'PCSX2',
-    exeNames: ['pcsx2-qt.exe', 'pcsx2.exe', 'pcsx2-qt-x64.exe'],
+    exeNames: ['pcsx2-qt', 'pcsx2', 'pcsx2-qt.exe', 'pcsx2.exe', 'pcsx2-qt-x64.exe'],
     romExtensions: ['.iso', '.chd', '.cso', '.bin', '.img', '.mdf', '.nrg', '.m2ts', '.gz', '.elf'],
     biosPatterns: ['scph', 'rom1.bin', 'rom2.bin', 'erom.bin'],
     platform: 'PS2',
-    launchArgs: (rom) => `-batch -fullscreen "${rom}"`,
+    launchArgs: (rom) => `-batch -fullscreen ${quoteRomArgument(rom)}`,
     downloadUrl: 'https://pcsx2.net/',
   image: require('@/assets/images/consolas/ps2.png'),
   },
@@ -71,11 +79,11 @@ export const EMULATORS: EmulatorDef[] = [
     id: 'ps3',
     name: 'PlayStation 3',
     emulatorName: 'RPCS3',
-    exeNames: ['rpcs3.exe'],
+    exeNames: ['rpcs3', 'rpcs3.exe'],
     romExtensions: ['.iso'],
     specialFiles: ['eboot.bin'],
     platform: 'PS3',
-    launchArgs: (rom) => `"${rom}"`,
+    launchArgs: (rom) => `${quoteRomArgument(rom)}`,
     downloadUrl: 'https://rpcs3.net/',
   image: require('@/assets/images/consolas/ps3.png'),
   },
@@ -83,11 +91,11 @@ export const EMULATORS: EmulatorDef[] = [
     id: 'psp',
     name: 'PlayStation Portable',
     emulatorName: 'PPSSPP',
-    exeNames: ['ppssppwindows64.exe', 'ppssppwindows.exe', 'ppsspp.exe'],
+    exeNames: ['PPSSPPSDL', 'PPSSPPQt', 'ppsspp', 'ppssppwindows64.exe', 'ppssppwindows.exe', 'ppsspp.exe'],
     romExtensions: ['.iso', '.cso', '.pbp', '.elf', '.prx'],
     platform: 'Retro',
     retroSystem: 'PSP',
-    launchArgs: (rom) => `"${rom}"`,
+    launchArgs: (rom) => `${quoteRomArgument(rom)}`,
     downloadUrl: 'https://www.ppsspp.org/',
   image: require('@/assets/images/consolas/psp.png'),
   },
@@ -95,11 +103,11 @@ export const EMULATORS: EmulatorDef[] = [
     id: 'gcwii',
     name: 'GameCube & Wii',
     emulatorName: 'Dolphin',
-    exeNames: ['dolphin.exe'],
+    exeNames: ['dolphin-emu', 'dolphin.exe'],
     romExtensions: ['.iso', '.gcm', '.rvz', '.wbfs', '.wad', '.ciso', '.gcz', '.tgc', '.dff', '.dol'],
     platform: 'Retro',
     retroSystemByExt: { '.rvz': 'WII', '.wbfs': 'WII', '.wad': 'WII', '.iso': 'GC', '.gcm': 'GC', '.ciso': 'GC', '.gcz': 'GC' },
-    launchArgs: (rom) => `-e -b "${rom}"`,
+    launchArgs: (rom) => `-e -b ${quoteRomArgument(rom)}`,
     downloadUrl: 'https://dolphin-emu.org/',
   image: require('@/assets/images/consolas/Wii-Console.png'),
   },
@@ -107,7 +115,7 @@ export const EMULATORS: EmulatorDef[] = [
     id: 'retroarch',
     name: 'RetroArch',
     emulatorName: 'RetroArch',
-    exeNames: ['retroarch.exe'],
+    exeNames: ['retroarch', 'retroarch.exe'],
     romExtensions: [
       '.nes', '.fds', '.snes', '.smc', '.sfc', '.n64', '.z64', '.v64',
       '.gb', '.gbc', '.gba', '.nds', '.3ds',
@@ -115,7 +123,7 @@ export const EMULATORS: EmulatorDef[] = [
       '.cue', '.bin', '.chd', '.iso', '.pbp', '.pce', '.ws', '.wsc',
     ],
     platform: 'Retro',
-    launchArgs: (rom) => `-f "${rom}"`,
+    launchArgs: (rom) => `-f ${quoteRomArgument(rom)}`,
     downloadUrl: 'https://www.retroarch.com/',
     image: require('@/assets/images/consolas/retroarch.png'),
   },
@@ -123,10 +131,10 @@ export const EMULATORS: EmulatorDef[] = [
     id: 'switch',
     name: 'Nintendo Switch',
     emulatorName: 'Ryujinx / Eden',
-    exeNames: ['ryujinx.exe', 'ryujinx.ava.exe', 'eden.exe'],
+    exeNames: ['Ryujinx', 'ryujinx', 'eden', 'ryujinx.exe', 'ryujinx.ava.exe', 'eden.exe'],
     romExtensions: ['.nsp', '.xci', '.nsz', '.xcz', '.nca', '.nro'],
     platform: 'Switch',
-    launchArgs: (rom) => `"${rom}"`,
+    launchArgs: (rom) => `${quoteRomArgument(rom)}`,
     downloadUrl: 'https://eden-emulator.github.io/',
     image: require('@/assets/images/consolas/Switch.png'),
   },
@@ -190,7 +198,7 @@ export async function detectEmulatorExe(def: EmulatorDef): Promise<string | null
   }
 }
 
-/** Diálogo para elegir el .exe del emulador. */
+/** Diálogo para elegir el ejecutable del emulador. */
 export async function pickEmulatorExe(): Promise<string | null> {
   try {
     const res = await api()?.selectFile?.();
@@ -241,7 +249,7 @@ export async function scanRomFolders(def: EmulatorDef, dirs: string[]): Promise<
       if (res && Array.isArray(res.roms)) {
         foldersScanned += 1;
         for (const rom of res.roms) {
-          if (rom?.path && !roms.some((r) => r.path.toLowerCase() === String(rom.path).toLowerCase())) {
+          if (rom?.path && !roms.some((r) => pathKey(r.path) === pathKey(String(rom.path)))) {
             roms.push({
               name: String(rom.name || ''),
               path: String(rom.path),
@@ -263,8 +271,8 @@ export async function scanRomFolders(def: EmulatorDef, dirs: string[]): Promise<
  * del mismo nombre no son juegos aparte (son las pistas del mismo disco).
  */
 function dedupeCueBins(roms: ScannedRom[]): ScannedRom[] {
-  const stripExt = (name: string) => name.replace(/\.[^/.]+$/, '').toLowerCase();
-  const dirOf = (p: string) => p.slice(0, Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))).toLowerCase();
+  const stripExt = (name: string) => pathKey(name.replace(/\.[^/.]+$/, ''));
+  const dirOf = (p: string) => pathKey(p.slice(0, Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))));
   const cueBaseNames = new Set<string>();
   for (const rom of roms) {
     if (rom.extension === '.cue') {
@@ -339,7 +347,7 @@ export async function importRomsToLauncher(
   const needSteamGrid = effPrefs.cover === 'steamgrid' || effPrefs.background === 'steamgrid' || effPrefs.logo === 'steamgrid';
   const language = (opts.language || 'es') as 'es' | 'en' | 'pt';
 
-  const pending = roms.filter((rom) => !existingPaths.has(rom.path.toLowerCase()));
+  const pending = roms.filter((rom) => !existingPaths.has(pathKey(rom.path)));
 
   const buildApp = async (rom: ScannedRom): Promise<{ app: any; path: string } | null> => {
     try {
@@ -362,6 +370,7 @@ export async function importRomsToLauncher(
         title,
         path: exePath,
         launchArgs: def.launchArgs(rom.path),
+        romPath: rom.path,
         type: 'game',
         platform: def.platform,
         ...(retroSystem ? { retroSystem } : {}),
@@ -411,7 +420,7 @@ export async function importRomsToLauncher(
   const addedPaths: string[] = [];
   for (const entry of built) {
     if (!entry) continue;
-    const key = entry.path.toLowerCase();
+    const key = pathKey(entry.path);
     if (existingPaths.has(key)) continue;
     try {
       await api()?.saveApp?.(entry.app);

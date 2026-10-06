@@ -251,13 +251,13 @@ export const GameInfoPanel = ({
       }
 
       const gamePath: string | null = achievementGame?.path ?? null;
-      const isLnk = typeof gamePath === 'string' && gamePath.toLowerCase().endsWith('.lnk');
+      const isLnk = typeof gamePath === 'string' && (gamePath.toLowerCase().endsWith('.lnk') || gamePath.endsWith('.desktop'));
       // ROM añadida por escaneo: el exe está en `path` y la ROM citada en `launchArgs`.
       const launchArgs: string | null = (achievementGame as any)?.launchArgs ?? null;
       const romMatch = typeof launchArgs === 'string' ? launchArgs.match(/"([^"]+)"/g) : null;
-      const romPath: string | null = romMatch && romMatch.length > 0
+      const romPath: string | null = (achievementGame as any)?.romPath || (romMatch && romMatch.length > 0
         ? romMatch[romMatch.length - 1].replace(/"/g, '')
-        : null;
+        : null);
 
       let cancelled = false;
       setSteamAchievements(null);

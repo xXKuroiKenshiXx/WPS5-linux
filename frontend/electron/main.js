@@ -6,6 +6,10 @@ const zlib = require('zlib');
 const { exec, spawn, fork } = require('child_process');
 const { pathToFileURL } = require('url');
 const http = require('http');
+const linux = process.platform === 'linux' ? require('./linux') : null;
+const linuxMedia = linux ? require('./linuxMedia') : null;
+let stopLinuxGamepad = null;
+if (linux && process.env.XDG_SESSION_TYPE === 'wayland') app.commandLine.appendSwitch('enable-features', 'GlobalShortcutsPortal');
 
 // Desactivar advertencias de seguridad de Electron en consola de desarrollo
 // (webSecurity se desactiva deliberadamente para permitir la carga de assets locales y de emuladores)
@@ -237,6 +241,7 @@ if (app.isPackaged && process.platform === 'win32') {
 }
 
 function getWindowsMediaSessionsModule() {
+  if (process.platform !== 'win32') return null;
   if (windowsMediaSessionsModule) return windowsMediaSessionsModule;
 
   const candidates = [
@@ -309,6 +314,7 @@ function resolveMediaControlApp(target) {
 }
 
 async function sendMediaControlAction(action, target) {
+  if (linuxMedia) return linuxMedia.control(action, target);
   if (process.platform !== 'win32') return { success: false };
 
   const media = await getWinMediaControlModule();
@@ -408,7 +414,7 @@ function clearWps5WebMediaHintIfMatched(sessions) {
 }
 
 async function fetchMediaSessionsForRenderer() {
-  let sessions = [];
+  let sessions = linuxMedia ? await linuxMedia.getSessions() : [];
   const mediaModule = getWindowsMediaSessionsModule();
 
   if (process.platform === 'win32' && mediaModule?.getAllSessions) {
@@ -443,6 +449,7 @@ function broadcastMediaSessions() {
 }
 
 function startMediaSessionsBridge() {
+  if (linuxMedia) { broadcastMediaSessions(); mediaSessionsPollTimer = setInterval(broadcastMediaSessions, 3000); return; }
   if (process.platform !== 'win32') return;
 
   const mediaModule = getWindowsMediaSessionsModule();
@@ -472,6 +479,7 @@ function startMediaSessionsBridge() {
 }
 
 function stopMediaSessionsBridge() {
+  if (linuxMedia) linuxMedia.shutdown();
   if (mediaSessionsPollTimer) {
     clearInterval(mediaSessionsPollTimer);
     mediaSessionsPollTimer = null;
@@ -547,7 +555,7 @@ function startStoreBackend() {
     return;
   }
 
-  const backendEntry = path.join(process.resourcesPath, 'backend/app.js');
+  const backendEntry = path.join(process.resourcesPath, 'backend/app.cjs');
   const backendCwd = path.join(process.resourcesPath, 'backend');
 
   storeBackendLog('[StoreBackend] entry=', backendEntry, 'cwd=', backendCwd);
@@ -977,6 +985,7 @@ function resolveXinputWatcherPath() {
 function startGamepadOverlayListener() {
   stopGamepadOverlayListener();
   if (!overlayEnabled) return;
+  if (linux) { stopLinuxGamepad = require('./linuxGamepad').start(overlayCombo, toggleOverlay); return; }
 
   // 2. Monitoreo para mandos XInput (Xbox o controladores emulados) y
   // PlayStation (DualShock 4 / DualSense vía Legacy Joystick API).
@@ -1032,6 +1041,7 @@ function startGamepadOverlayListener() {
 }
 
 function stopGamepadOverlayListener() {
+  if (stopLinuxGamepad) { stopLinuxGamepad(); stopLinuxGamepad = null; }
   if (hidCheckInterval) {
     clearInterval(hidCheckInterval);
     hidCheckInterval = null;
@@ -1055,6 +1065,7 @@ function stopGamepadOverlayListener() {
 // - Steam / Epic: no tenemos PID propio, matamos por ruta de instalación
 // igual que hace isProcessRunningUnderDir() para detectarlos.
 function killProcessTree(pid) {
+  if (linux) return linux.killProcessTree(pid);
   return new Promise((resolve) => {
     if (process.platform !== 'win32') return resolve(false);
     exec(`taskkill /PID ${pid} /T /F`, { timeout: 8000 }, (error) => {
@@ -1064,6 +1075,7 @@ function killProcessTree(pid) {
 }
 
 function killProcessesUnderDir(dirPath) {
+  if (linux) return linux.killProcessesUnderDir(dirPath);
   return new Promise((resolve) => {
     if (!dirPath || process.platform !== 'win32') return resolve(false);
     const escaped = dirPath.replace(/'/g, "''");
@@ -1103,6 +1115,7 @@ function findSteamGameInstallDir(appId) {
 }
 
 function isProcessRunningUnderDir(dirPath) {
+  if (linux) return linux.processesUnderDir(dirPath).then(pids => pids.length > 0);
   return new Promise((resolve) => {
     if (!dirPath || process.platform !== 'win32') return resolve(false);
     const escaped = dirPath.replace(/'/g, "''");
@@ -1618,6 +1631,7 @@ function getEpicManifestsPath() {
 }
 
 function getEpicInstalledGames() {
+  if (linux) return linux.getEpicInstalledGames();
   const manifestsPath = getEpicManifestsPath();
   console.log('[Epic] Buscando manifests en:', manifestsPath);
 
@@ -1693,6 +1707,7 @@ function getEpicInstalledGames() {
 // instalación desde su manifiesto (Data/Manifests/*.item) para poder
 // vigilarla y saber cuándo el juego se cierra.
 function findEpicGameInstallDir(appName) {
+  if (linux) return linux.getEpicInstalledGames().find(g => g.appName === appName)?.installLocation || null;
   const manifestsPath = getEpicManifestsPath();
   if (!fs.existsSync(manifestsPath)) return null;
 
@@ -1721,6 +1736,7 @@ function findEpicGameInstallDir(appName) {
 }
 
 function getSteamInstallPath() {
+  if (linux) return linux.getSteamPath();
   if (process.platform === 'win32') {
     try {
       const { execSync } = require('child_process');
@@ -1766,6 +1782,15 @@ function parseVdfLibraryPaths(content) {
 
 function getSteamLibraryFolders(steamPath) {
   const folders = [path.join(steamPath, 'steamapps')];
+  if (linux) {
+    for (const root of linux.steamCandidates()) {
+      if (root === steamPath || !fs.existsSync(path.join(root, 'steamapps'))) continue;
+      folders.push(path.join(root, 'steamapps'));
+      try {
+        for (const lib of parseVdfLibraryPaths(fs.readFileSync(path.join(root, 'steamapps/libraryfolders.vdf'), 'utf8'))) folders.push(path.join(lib, 'steamapps'));
+      } catch { /* empty Steam installation */ }
+    }
+  }
   const vdfPath = path.join(steamPath, 'steamapps', 'libraryfolders.vdf');
 
   if (fs.existsSync(vdfPath)) {
@@ -2145,6 +2170,8 @@ app.on('second-instance', () => {
 });
 
 app.whenReady().then(async () => {
+  if (linux) await linux.init();
+  ipcMain.handle('get-rpcs3-data-dir', (_event, configured) => linux ? linux.rpcs3DataDir(configured) : path.dirname(configured || ''));
   initDB();
   startStoreBackend();
   startMediaSessionsBridge();
@@ -2196,6 +2223,7 @@ app.whenReady().then(async () => {
   // está instalado/compilado, el launcher arranca igual y el widget muestra "—".
   let psBatteryModule;
   ipcMain.handle('get-ps-batteries', async () => {
+    if (linux) return linux.getPsBatteries();
     try {
       if (psBatteryModule === undefined) {
         try {
@@ -2841,6 +2869,14 @@ app.whenReady().then(async () => {
       }
     }
 
+    let linuxPlan = null;
+    if (linux && executablePath.endsWith('.desktop')) {
+      try {
+        linuxPlan = await linux.resolveLaunch(executablePath, extraLaunchArgs);
+        const protocolArg = linuxPlan.args.find(a => /^(steam|heroic):\/\//i.test(a));
+        if (protocolArg) { executablePath = protocolArg; linuxPlan = null; }
+      } catch (error) { return { success: false, suspended: false, error: error.message }; }
+    }
     const lowerPath = executablePath.toLowerCase();
 
     // Caso especial: steam://rungameid/<appid>. Steam gestiona el proceso
@@ -2853,7 +2889,7 @@ app.whenReady().then(async () => {
     const steamRunMatch = executablePath.match(/^steam:\/\/rungameid\/(\d+)$/i);
     if (steamRunMatch) {
       const appId = steamRunMatch[1];
-      shell.openExternal(executablePath).catch(console.error);
+      try { await shell.openExternal(executablePath); } catch (error) { return { success: false, suspended: false, error: error.message }; }
 
       const installDir = findSteamGameInstallDir(appId);
       if (!installDir) {
@@ -2891,6 +2927,14 @@ app.whenReady().then(async () => {
       return { success: true, suspended: true };
     }
 
+    const heroicMatch = executablePath.match(/^heroic:\/\/launch\/legendary\/([^/?]+)/i);
+    if (linux && heroicMatch) {
+      try { await shell.openExternal(executablePath); } catch (error) { return { success: false, suspended: false, error: error.message }; }
+      const installDir = findEpicGameInstallDir(decodeURIComponent(heroicMatch[1]));
+      if (!installDir) return { success: true, suspended: false };
+      startSteamGameWatch(id, heroicMatch[1], installDir, 'Epic', { title: appRecord?.title, image: resolveAppRecordThumbnail(appRecord) });
+      return { success: true, suspended: true };
+    }
     // URLs y protocolos (http://, etc.)
     if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(executablePath)) {
       if (shouldLaunchWebFullscreen(executablePath, appRecord)) {
@@ -2912,7 +2956,12 @@ app.whenReady().then(async () => {
     let targetExe = executablePath;
     let launchArgs = [];
     let launchWorkingDir = null;
-    if (lowerPath.endsWith('.lnk')) {
+    if (linux) {
+      try {
+        linuxPlan = linuxPlan || await linux.resolveLaunch(executablePath, extraLaunchArgs);
+        targetExe = linuxPlan.command; launchArgs = linuxPlan.args; launchWorkingDir = linuxPlan.cwd;
+      } catch (error) { return { success: false, suspended: false, error: error.message }; }
+    } else if (lowerPath.endsWith('.lnk')) {
       const resolved = await resolveLnkTarget(executablePath);
       if (resolved && resolved.targetPath) {
         targetExe = resolved.targetPath;
@@ -2971,14 +3020,15 @@ app.whenReady().then(async () => {
       console.log('Lanzando:', targetExe, launchArgs);
       console.log('Directorio de trabajo:', gameCwd);
 
-      const child = spawn(targetExe, launchArgs, {
+      const child = (linux ? linux.spawnExternal : spawn)(targetExe, launchArgs, {
         cwd: gameCwd,
         env: envForExternalApp(),
         detached: true,
         stdio: 'ignore',
         windowsHide: false,
-        windowsVerbatimArguments: true,
+        windowsVerbatimArguments: process.platform === 'win32',
       });
+      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
 
       // ── NUEVO: registrar juego activo + habilitar overlay ──
       activeGameInfo = {
@@ -3005,6 +3055,7 @@ app.whenReady().then(async () => {
     } catch (err) {
       console.error('Excepción al lanzar el juego:', err);
       resumeLauncher();
+      return { success: false, suspended: false, error: err.message };
     }
 
     return { success: true, suspended: true };
@@ -3015,7 +3066,7 @@ app.whenReady().then(async () => {
     const result = await dialog.showOpenDialog({
       properties: ['openFile', 'noResolveAliases'],
       filters: [
-        { name: 'Ejecutables', extensions: ['exe', 'bat', 'lnk', 'url'] },
+        ...(linux ? [{ name: 'Aplicaciones Linux', extensions: ['*'] }] : [{ name: 'Ejecutables', extensions: ['exe', 'bat', 'lnk', 'url'] }]),
         { name: 'Todos los archivos', extensions: ['*'] }
       ]
     });
@@ -3075,6 +3126,7 @@ app.whenReady().then(async () => {
   // ── Emulación: detectar ejecutable del emulador ──────────────────────────
   // Busca los nombres de .exe en rutas comunes de instalación.
   ipcMain.handle('detect-emulator-exe', async (event, exeNames) => {
+    if (linux) return linux.detectEmulator(Array.isArray(exeNames) ? exeNames : []);
     try {
       const names = new Set((Array.isArray(exeNames) ? exeNames : []).map((n) => String(n).toLowerCase()));
       if (names.size === 0 || process.platform !== 'win32') return null;
@@ -3684,6 +3736,7 @@ app.whenReady().then(async () => {
 
   // IPC: Obtener info de almacenamiento (Windows) — devuelve hasta 3 discos locales
   ipcMain.handle('get-storage-info', async () => {
+    if (linux) return linux.getStorageInfo();
     return new Promise((resolve) => {
       if (process.platform !== 'win32') {
         resolve({ success: false, error: 'Plataforma no soportada' });
@@ -3754,7 +3807,7 @@ app.whenReady().then(async () => {
       }
       // Normalizar: quitar prefijo file:// si viene como URI
       const normalizedPath = filePath.startsWith('file://')
-        ? decodeURIComponent(filePath.replace(/^file:\/\/\/?/, '').replace(/\//g, path.sep))
+        ? require('url').fileURLToPath(filePath)
         : filePath;
 
       if (!fs.existsSync(normalizedPath)) {
@@ -3840,6 +3893,7 @@ app.whenReady().then(async () => {
 
   // IPC: Obtener lista de programas instalados en Windows (estilo Steam)
   ipcMain.handle('get-installed-programs', async () => {
+    if (linux) return { success: true, programs: await linux.getInstalledPrograms() };
     if (process.platform !== 'win32') {
       return { success: true, programs: [] };
     }

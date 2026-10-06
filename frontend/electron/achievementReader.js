@@ -50,7 +50,8 @@ function getXml2js() {
 const glob = require('fast-glob');
 const { crc32 } = require('crc');
 const { parse: parseIni } = require('@xan105/ini');
-const regedit = require('regodit');
+const linux = process.platform === 'linux' ? require('./linux') : null;
+const regedit = process.platform === 'win32' ? require('regodit') : null;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers internos
@@ -385,7 +386,8 @@ async function parseAchievementsFromDir(dirPath, schemaList) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Rutas base de cada emulador, con su etiqueta de fuente. */
-function getEmulatorSearchPaths() {
+function getEmulatorSearchPaths(appId) {
+  if (linux) return linux.achievementSearchPaths(appId);
   const pub = process.env.PUBLIC || process.env.Public || 'C:\\Users\\Public';
   const appdata = process.env.APPDATA || '';
   const local = process.env.LOCALAPPDATA || '';
@@ -431,7 +433,7 @@ async function findEmulatorDirs(appId) {
     found.push({ dirPath, source });
   };
 
-  for (const { base, source, empressStyle } of getEmulatorSearchPaths()) {
+  for (const { base, source, empressStyle } of getEmulatorSearchPaths(appId)) {
     if (!fs.existsSync(base)) continue;
 
     // EMPRESS almacena los logros en <base>/<appId>/remote/<appId>/
@@ -587,6 +589,8 @@ async function findLocalAchievementDirs(exePath, appId) {
  * @returns {Map<string, {achieved, unlockTime}> | null}
  */
 async function readGreenLumaAchievements(appId) {
+  if (linux) return linux.readWineAchievements(appId);
+  if (!regedit) return null;
   const strId = String(appId);
   const variants = [
     { root: 'HKCU', key: `SOFTWARE/GLR/AppID/${strId}`, skipKey: 'SkipStatsAndAchievements', achPath: `SOFTWARE/GLR/AppID/${strId}/Achievements` },
@@ -752,6 +756,7 @@ function bufferSplit(buffer, separators) {
  * @returns {Promise<object|null>} NormalizedSummary con rarity real (P/G/S/B)
  */
 async function scanRpcs3Trophies(rpcs3Dir, npCommId) {
+  if (linux) rpcs3Dir = linux.rpcs3DataDir(rpcs3Dir);
   const xmlLib = getXml2js();
   if (!xmlLib) {
     console.warn('[AchievementReader] xml2js no disponible; instala: npm install xml2js');
@@ -1037,6 +1042,7 @@ function readParamSfoFields(sfoPath) {
  *   c) Vacío:       buscar por nombre del juego en el TROPCONF
  */
 async function findNpCommIdByGameId(rpcs3Dir, gameId, gameNameHint = '') {
+  if (linux) rpcs3Dir = linux.rpcs3DataDir(rpcs3Dir);
   const xmlLib = getXml2js();
   if (!xmlLib) return null;
 
@@ -1155,6 +1161,17 @@ async function findNpCommIdByGameId(rpcs3Dir, gameId, gameNameHint = '') {
  * @returns {Promise<NormalizedSummary|null>}
  */
 async function resolveRpcs3GameFromLnk(lnkPath, rpcs3Dir) {
+  if (linux && lnkPath?.endsWith('.desktop')) {
+    rpcs3Dir = linux.rpcs3DataDir(rpcs3Dir);
+    try {
+      const text = linux.isFlatpak() ? (await linux.runHost('cat', [lnkPath])).stdout : fs.readFileSync(lnkPath,'utf8');
+      const entry = linux.parseDesktop(text,lnkPath);
+      const match = (entry?.args.join(' ') || '').match(/\b([A-Z]{4}\d{5})\b/i);
+      if (!match) return null;
+      const found = await findNpCommIdByGameId(rpcs3Dir,match[1].toUpperCase(),entry.name);
+      return found ? scanRpcs3Trophies(rpcs3Dir,found.npCommId) : null;
+    } catch { return null; }
+  }
   if (!lnkPath || !rpcs3Dir) return null;
   if (!fs.existsSync(lnkPath) || !fs.existsSync(rpcs3Dir)) return null;
 

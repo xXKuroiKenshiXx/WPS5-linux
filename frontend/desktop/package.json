@@ -1,0 +1,16 @@
+{
+  "name": "wps5-linux",
+  "version": "1.1.5",
+  "main": "electron/main.js",
+  "private": true,
+  "description": "Console-style game launcher for Linux, Steam and emulators",
+  "author": "WPS5 contributors",
+  "homepage": "https://github.com/xXKuroiKenshiXx/WPS5-linux",
+  "dependencies": {
+    "@xan105/ini": "^2.2.0",
+    "crc": "^4.3.2",
+    "dbus-next": "^0.10.2",
+    "fast-glob": "^3.3.3",
+    "xml2js": "^0.6.2"
+  }
+}

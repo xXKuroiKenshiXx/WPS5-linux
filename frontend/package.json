@@ -1,5 +1,5 @@
 {
-  "name": "FifthStationUI",
+  "name": "wps5-linux",
   "main": "expo-router/entry",
   "version": "1.1.5",
   "scripts": {
@@ -13,8 +13,14 @@
     "backend:dev": "npm --prefix ../backend run dev",
     "electron:dev": "concurrently \"npm run backend:dev\" \"npm run electron:start\"",
     "backend:build": "npm --prefix ../backend run build",
-    "electron:build": "npm run backend:build && expo export -p web && electron-builder",
-    "sync-music": "node scripts/sync-music.mjs"
+    "electron:build": "npm run desktop:deps && npm run backend:build && expo export -p web && electron-builder",
+    "sync-music": "node scripts/sync-music.mjs",
+    "test:linux": "node --test electron/test/*.test.js",
+    "electron:build:linux": "npm run desktop:deps && npm run backend:build && expo export -p web && electron-builder --linux AppImage flatpak --x64",
+    "electron:build:appimage": "npm run desktop:deps && npm run backend:build && expo export -p web && electron-builder --linux AppImage --x64",
+    "electron:build:flatpak": "npm run desktop:deps && npm run backend:build && expo export -p web && electron-builder --linux flatpak --x64",
+    "desktop:deps": "node scripts/prepare-desktop.cjs",
+    "test:smoke:linux": "node scripts/smoke-linux.cjs"
   },
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
@@ -44,7 +50,6 @@
     "expo-video": "~3.0.16",
     "expo-web-browser": "~15.0.10",
     "fast-glob": "^3.3.3",
-    "node-hid": "^3.4.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
@@ -56,9 +61,8 @@
     "react-native-webview": "13.15.0",
     "react-native-worklets": "0.5.1",
     "react-native-youtube-iframe": "^2.4.1",
-    "regodit": "^2.4.1",
-    "win-media-control": "^0.1.1",
-    "windows-media-sessions": "^1.0.3"
+    "dbus-next": "^0.10.2",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",
@@ -76,17 +80,18 @@
   },
   "private": true,
   "build": {
-    "appId": "com.fifthstationui.app",
+    "appId": "io.github.xXKuroiKenshiXx.WPS5Linux",
     "productName": "FifthStation UI",
     "directories": {
-      "output": "dist-electron"
+      "output": "dist-electron",
+      "app": "desktop"
     },
     "extraResources": [
       {
         "from": "../backend/dist",
         "to": "backend",
         "filter": [
-          "**/*"
+          "app.cjs"
         ]
       },
       {
@@ -98,12 +103,24 @@
       }
     ],
     "files": [
-      "electron/**/*",
-      "package.json",
-      "assets/**/*",
-      "node_modules/windows-media-sessions/**/*",
-      "node_modules/win-media-control/**/*",
-      "node_modules/node-hid/**/*"
+      {
+        "from": "../electron",
+        "to": "electron",
+        "filter": [
+          "**/*",
+          "!test/**"
+        ]
+      },
+      {
+        "from": "../assets/icons",
+        "to": "assets/icons",
+        "filter": [
+          "logo.png",
+          "wps5FullWhite.svg",
+          "steam.png"
+        ]
+      },
+      "package.json"
     ],
     "asarUnpack": [
       "node_modules/windows-media-sessions/bin/**",
@@ -124,6 +141,71 @@
       "installerIcon": "assets/icons/wps5.ico",
       "uninstallerIcon": "assets/icons/wps5.ico",
       "installerHeaderIcon": "assets/icons/wps5.ico"
-    }
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "flatpak"
+      ],
+      "executableName": "wps5-linux",
+      "category": "Game",
+      "icon": "assets/icons/logo.png",
+      "artifactName": "WPS5-Linux-${version}-${arch}.${ext}",
+      "desktop": {
+        "entry": {
+          "Name": "WPS5 Linux",
+          "Comment": "Game launcher for Steam, Linux games and emulators",
+          "Categories": "Game;"
+        }
+      }
+    },
+    "flatpak": {
+      "runtime": "org.freedesktop.Platform",
+      "runtimeVersion": "25.08",
+      "sdk": "org.freedesktop.Sdk",
+      "base": "org.electronjs.Electron2.BaseApp",
+      "baseVersion": "25.08",
+      "finishArgs": [
+        "--share=ipc",
+        "--share=network",
+        "--socket=x11",
+        "--socket=wayland",
+        "--socket=pulseaudio",
+        "--device=dri",
+        "--device=input",
+        "--filesystem=xdg-desktop:ro",
+        "--filesystem=xdg-documents:ro",
+        "--filesystem=xdg-download:ro",
+        "--filesystem=xdg-pictures",
+        "--filesystem=xdg-videos:ro",
+        "--filesystem=xdg-music:ro",
+        "--filesystem=xdg-data/applications:ro",
+        "--filesystem=~/.wine:ro",
+        "--filesystem=xdg-data/Goldberg SteamEmu Saves:ro",
+        "--filesystem=xdg-data/GSE Saves:ro",
+        "--filesystem=~/.steam:ro",
+        "--filesystem=~/.local/share/Steam:ro",
+        "--filesystem=~/.var/app/com.valvesoftware.Steam:ro",
+        "--filesystem=xdg-config/rpcs3:ro",
+        "--filesystem=~/.var/app/net.rpcs3.RPCS3:ro",
+        "--filesystem=xdg-config/heroic:ro",
+        "--filesystem=xdg-config/legendary:ro",
+        "--filesystem=~/.var/app/com.heroicgameslauncher.hgl:ro",
+        "--talk-name=org.freedesktop.Flatpak",
+        "--talk-name=org.mpris.MediaPlayer2.*",
+        "--env=GTK_USE_PORTAL=1"
+      ],
+      "useWaylandFlags": true
+    },
+    "electronDist": "node_modules/electron/dist"
+  },
+  "description": "Console-style game launcher for Linux, Steam and emulators",
+  "author": "WPS5 contributors",
+  "homepage": "https://github.com/xXKuroiKenshiXx/WPS5-linux",
+  "optionalDependencies": {
+    "regodit": "^2.4.1",
+    "win-media-control": "^0.1.1",
+    "windows-media-sessions": "^1.0.3",
+    "node-hid": "^3.4.0"
   }
 }

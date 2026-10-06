@@ -1,3 +1,9 @@
+# WPS5 Linux
+
+Fork para Linux con paquetes AppImage y Flatpak, integración de Steam, aplicaciones Linux y emuladores.
+
+Consulta la [guía Linux](docs/LINUX.md) para instalar, compilar, configurar bibliotecas y revisar el alcance de compatibilidad y las pruebas pendientes.
+
 
 # WPS5
 

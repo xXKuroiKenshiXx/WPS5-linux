@@ -1,3 +1,4 @@
+import { pathKey } from '../services/emulationService';
 import { useTranslation } from '@/contexts/LanguageContext';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -196,7 +197,7 @@ export const EmulationView = ({ activeUser, updateUser, libraryGames, onBack, on
 
   const handleAddRomFolder = async () => {
     const picked = await pickFolder();
-    if (picked && !romPaths.some((p) => p.toLowerCase() === picked.toLowerCase())) {
+    if (picked && !romPaths.some((p) => pathKey(p) === pathKey(picked))) {
       setRomPaths((prev) => [...prev, picked]);
       soundService.playActivation?.();
     }
@@ -256,7 +257,7 @@ export const EmulationView = ({ activeUser, updateUser, libraryGames, onBack, on
     for (const folder of folders) {
       const result = await scanRomFolders(def, [folder]);
       const fresh = result.roms.filter((r) => {
-        const key = r.path.toLowerCase();
+        const key = pathKey(r.path);
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -276,18 +277,19 @@ export const EmulationView = ({ activeUser, updateUser, libraryGames, onBack, on
     const addVariant = (p: unknown) => {
       const raw = String(p || '');
       if (!raw) return;
-      existingPaths.add(raw.toLowerCase());
+      existingPaths.add(pathKey(raw));
       const quoted = raw.match(/"([^"]+)"/g);
-      if (quoted) quoted.forEach((q) => existingPaths.add(q.replace(/"/g, '').toLowerCase()));
+      if (quoted) quoted.forEach((q) => existingPaths.add(pathKey(q.replace(/"/g, ''))));
     };
     for (const game of libraryGames || []) {
+      addVariant((game as any)?.romPath);
       addVariant((game as any)?.path);
       addVariant((game as any)?.launchArgs);
     }
     // El historial solo cuenta si el juego sigue en la librería: si el
     // usuario lo borró, el reescaneo debe volver a añadirlo.
-    const liveAddedPaths = (cfg.addedPaths || []).filter((p) => existingPaths.has(p.toLowerCase()));
-    for (const p of liveAddedPaths) existingPaths.add(p.toLowerCase());
+    const liveAddedPaths = (cfg.addedPaths || []).filter((p) => existingPaths.has(pathKey(p)));
+    for (const p of liveAddedPaths) existingPaths.add(pathKey(p));
 
     const { added, addedPaths } = await importRomsToLauncher(
       def, exePath, allRoms, existingPaths, { language, rawPrefs: activeUser?.settings?.syncPreferences },
@@ -307,7 +309,7 @@ export const EmulationView = ({ activeUser, updateUser, libraryGames, onBack, on
     const nextSettings: any = { ...activeUser?.settings, emulators: nextEmulators };
     // Para PS3, la carpeta del emulador alimenta también los trofeos RPCS3.
     if (def.id === 'ps3') {
-      nextSettings.rpcs3Path = exePath.replace(/[/\\][^/\\]+$/, '');
+      nextSettings.rpcs3Path = await (window as any).electronAPI?.getRpcs3DataDir?.(exePath) || exePath.replace(/[/\\][^/\\]+$/, '');
     }
     updateUser({ settings: nextSettings });
     if (added > 0) onGamesImported?.();
@@ -355,7 +357,7 @@ export const EmulationView = ({ activeUser, updateUser, libraryGames, onBack, on
     const picked = await pickFolder();
     if (!picked) return;
     const cfg = configs[def.id] || emptyEmulatorConfig();
-    if ((cfg.romPaths || []).some((p) => p.toLowerCase() === picked.toLowerCase())) return;
+    if ((cfg.romPaths || []).some((p) => pathKey(p) === pathKey(picked))) return;
     persistConfig(def, { romPaths: [...(cfg.romPaths || []), picked] });
     soundService.playActivation?.();
   };

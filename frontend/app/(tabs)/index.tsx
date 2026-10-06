@@ -1,3 +1,4 @@
+import { fetchLatestRelease, currentVersion } from '../../services/updateService';
 import { ResizeMode, Video } from '@/components/AppVideo';
 import BackgroundVideo from '@/components/BackgroundVideo';
 import FavoritesView from '@/components/FavoritesView';
@@ -1553,20 +1554,7 @@ export default function ConsoleHome() {
 
   const CheckUpdates = async () => {
     try {
-      const res = await fetch(
-        'https://angelvc25.github.io/WPS5-API/WPS5-API-V.json'
-      );
-      if (!res.ok) throw new Error('Network response was not ok');
-      const data = await res.json() as {
-        name: string;
-        tipe: string;
-        version: string;
-        link: string;
-      }[];
-      const latest = data[0];
-      console.log(latest.version, latest.tipe, latest.link);
-      console.log(data);
-      const currentVersion = '1.1.5';
+      const latest = await fetchLatestRelease();
       const comparison = compareVersions(latest.version, currentVersion);
       if (comparison > 0) {
         toastService.show(`${t('settings.updateAvailable')}\n${latest.version}`, {

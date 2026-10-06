@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('electronAPI', {
+  platform: process.platform,
+  getRpcs3DataDir: configured => ipcRenderer.invoke('get-rpcs3-data-dir', configured),
   getApps: () => ipcRenderer.invoke('get-apps'),
   getUsers: () => ipcRenderer.invoke('get-users'),
   saveApp: (appData) => ipcRenderer.invoke('save-app', appData),

@@ -1,3 +1,4 @@
+import { fetchLatestRelease, currentVersion } from '../services/updateService';
 import { PSIcons } from '@/constants/psIcons';
 import { useTranslation } from '@/contexts/LanguageContext';
 import { LANGUAGE_OPTIONS, Language } from '@/i18n/translations';
@@ -1315,7 +1316,7 @@ export default function SettingsView({
 
             <TouchableOpacity
               style={styles.supportLinkBtn}
-              onPress={() => Linking.openURL('https://github.com/angelvc25/WPS5')}
+              onPress={() => Linking.openURL('https://github.com/xXKuroiKenshiXx/WPS5-linux')}
             >
               <Ionicons name="logo-github" size={s(22)} color="#FFF" />
               <Text style={styles.supportLinkBtnText}>GitHub</Text>
@@ -2552,20 +2553,7 @@ export default function SettingsView({
                     style={styles.psButtonLarge}
                     onPress={async () => {
                       try {
-                        const res = await fetch(
-                          'https://angelvc25.github.io/WPS5-API/WPS5-API-V.json'
-                        );
-                        if (!res.ok) throw new Error('Network response was not ok');
-                        const data = await res.json() as {
-                          name: string;
-                          tipe: string;
-                          version: string;
-                          link: string;
-                        }[];
-                        const latest = data[0];
-                        console.log(latest.version, latest.tipe, latest.link);
-                        console.log(data);
-                        const currentVersion = '1.1.5';
+                        const latest = await fetchLatestRelease();
                         const comparison = compareVersions(latest.version, currentVersion);
                         if (comparison > 0) {
                           toastService.show(`${t('settings.updateAvailable')}\n${latest.version}`, {
@@ -3068,7 +3056,7 @@ const createStyles = (s: ScaleFn) => StyleSheet.create({
 
     height: s(37),
     //maxWidth: 340,
-    position: 'fixed',
+    position: Platform.OS === 'web' ? ('fixed' as any) : 'absolute',
     right: s(20),
     bottom: s(20),
     paddingHorizontal: s(22),
@@ -3083,7 +3071,7 @@ const createStyles = (s: ScaleFn) => StyleSheet.create({
 
     height: s(37),
     //maxWidth: 340,
-    position: 'fixed',
+    position: Platform.OS === 'web' ? ('fixed' as any) : 'absolute',
     left: s(20),
     bottom: s(20),
     paddingHorizontal: s(22),

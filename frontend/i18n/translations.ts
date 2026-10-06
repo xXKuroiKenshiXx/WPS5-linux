@@ -166,7 +166,7 @@ const es = {
   'settings.notDownloadedYet': 'Todavía no descargaste ningún video. Los que uses en Boot o Suspend aparecerán aquí.',
 
   'settings.rpcs3Folder': 'Carpeta de RPCS3',
-  'settings.rpcs3FolderDesc': 'Carpeta raíz de RPCS3 (donde está rpcs3.exe). Necesaria para leer trofeos de juegos de PS3.',
+  'settings.rpcs3FolderDesc': 'Carpeta raíz de RPCS3 (contiene dev_hdd0). Necesaria para leer trofeos de juegos de PS3.',
   'settings.rpcs3Path': 'Ruta actual: {path}',
   'settings.selectRpcs3Folder': 'Seleccionar Carpeta de RPCS3',
   'settings.removeRpcs3Folder': 'Eliminar carpeta de RPCS3',
@@ -341,7 +341,7 @@ const es = {
 
   'cc.discoverMoreDesc': 'Aprovecha al máximo tu PC',
   'cc.addGameManually': 'Añade juegos manualmente',
-  'cc.addGameManuallyDesc': 'Desde el widget Agregar Juego en Inicio verás tus programas instalados: márcalos, elige plataforma y confirma. Si un juego no aparece, usa Examinar para añadir su .exe.',
+  'cc.addGameManuallyDesc': 'Desde el widget Agregar Juego en Inicio verás tus programas instalados: márcalos, elige plataforma y confirma. Si un juego no aparece, usa Examinar para añadir su ejecutable o acceso .desktop.',
   'cc.addEmulatedGames': 'Añade tus juegos emulados',
   'cc.addEmulatedGamesDesc': 'Crea accesos directos (.lnk) de tus juegos de emulador en una carpeta, añádelos desde el widget Agregar Juego y ponles su plataforma especifica (PS1, PS2, PSP, PS3)/ Retro con su sistema (PSP, N64, WiiU, Wii, etc.).',
   'cc.emulatedGamesDesc2': 'desde ajustes -> emulación gestiona y agrega tus emuladores y escanea tus carpetas de roms, por favor asegurate de que los archivos de los juegos tengan el nombre correcto, y para los juegos de PS3 asegurate que la carpeta del juego tenga el serial para poder leer sus logros, si es un formato iso agregalo a una carpeta con el id (serial) junto con los demás juegos formato carpeta',
@@ -727,7 +727,7 @@ const es = {
   'edit.description': 'Descripción',
   'edit.executableLocation': 'Ubicación del ejecutable o enlace',
   'edit.steamLaunch': 'Lanzamiento vía Steam',
-  'edit.selectNewExe': 'Seleccionar nuevo ejecutable (.exe)',
+  'edit.selectNewExe': 'Seleccionar nuevo ejecutable',
   'edit.currentPath': 'Ruta actual del juego:',
   'edit.noPath': 'No seleccionada',
   'edit.launchArgs': 'Parámetros de lanzamiento',
@@ -784,7 +784,7 @@ const es = {
 
   'add.title': 'Añadir Nueva Aplicación',
   'add.appName': 'Nombre de la Aplicación',
-  'add.selectExe': 'Seleccionar Ejecutable (.exe)',
+  'add.selectExe': 'Seleccionar Ejecutable',
   'add.path': 'Ruta: ...{path}',
   'add.coverOptional': 'Portada (Opcional - Auto-fetch)',
   'add.cover': 'Portada: ...{path}',
@@ -1163,7 +1163,7 @@ const en: Record<TranslationKey, string> = {
   'settings.notDownloadedYet': 'You haven\'t downloaded any videos yet. The ones you use in Boot or Suspend will appear here.',
 
   'settings.rpcs3Folder': 'RPCS3 Folder',
-  'settings.rpcs3FolderDesc': 'RPCS3 root folder (where rpcs3.exe is). Required to read trophies from PS3 games.',
+  'settings.rpcs3FolderDesc': 'RPCS3 root folder (contains dev_hdd0). Required to read trophies from PS3 games.',
   'settings.rpcs3Path': 'Current path: {path}',
   'settings.selectRpcs3Folder': 'Select RPCS3 Folder',
   'settings.removeRpcs3Folder': 'Remove RPCS3 Folder',
@@ -1336,7 +1336,7 @@ const en: Record<TranslationKey, string> = {
 
   'cc.discoverMoreDesc': 'Take full advantage of your PC',
   'cc.addGameManually': 'Add games manually',
-  'cc.addGameManuallyDesc': 'From the Add Game widget on Home you will see your installed programs: check them, choose a platform and confirm. If a game is missing, use Browse to add its .exe.',
+  'cc.addGameManuallyDesc': 'From the Add Game widget on Home you will see your installed programs: check them, choose a platform and confirm. If a game is missing, use Browse to add its executable or .desktop shortcut.',
   'cc.addEmulatedGames': 'Add your emulated games',
   'cc.addEmulatedGamesDesc': 'Create .lnk shortcuts of your emulator games in a folder, add them from the Add Game widget and set the Retro platform with its system (PS1, PS2, PSP, PS3)/ Retro with its system (PSP, N64, WiiU, Wii, etc.).',
   'cc.emulatedGamesDesc2': 'from Settings -> Emulation, manage and add your emulators and scan your rom folders, please make sure that the game files have the correct name, and for PS3 games make sure the game folder has the serial to read its achievements, if it is an iso format add it to a folder with the id (serial) along with the other games',
@@ -1722,7 +1722,7 @@ const en: Record<TranslationKey, string> = {
   'edit.description': 'Description',
   'edit.executableLocation': 'Executable or link location',
   'edit.steamLaunch': 'Launch via Steam',
-  'edit.selectNewExe': 'Select new executable (.exe)',
+  'edit.selectNewExe': 'Select new executable',
   'edit.currentPath': 'Current game path:',
   'edit.noPath': 'Not selected',
   'edit.launchArgs': 'Launch parameters',
@@ -1779,7 +1779,7 @@ const en: Record<TranslationKey, string> = {
 
   'add.title': 'Add New Application',
   'add.appName': 'Application Name',
-  'add.selectExe': 'Select Executable (.exe)',
+  'add.selectExe': 'Select Executable',
   'add.path': 'Path: ...{path}',
   'add.coverOptional': 'Cover (Optional - Auto-fetch)',
   'add.cover': 'Cover: ...{path}',
@@ -2152,7 +2152,7 @@ const pt: Record<TranslationKey, string> = {
   'settings.notDownloadedYet': 'Você ainda não baixou nenhum vídeo. Os que você usar em Boot ou Suspend aparecerão aqui.',
 
   'settings.rpcs3Folder': 'Pasta do RPCS3',
-  'settings.rpcs3FolderDesc': 'Pasta raiz do RPCS3 (onde está o rpcs3.exe). Necessária para ler troféus de jogos de PS3.',
+  'settings.rpcs3FolderDesc': 'Pasta raiz do RPCS3 (contém dev_hdd0). Necessária para ler troféus de jogos de PS3.',
   'settings.rpcs3Path': 'Caminho atual: {path}',
   'settings.selectRpcs3Folder': 'Selecionar Pasta do RPCS3',
   'settings.removeRpcs3Folder': 'Remover pasta do RPCS3',
@@ -2325,7 +2325,7 @@ const pt: Record<TranslationKey, string> = {
 
   'cc.discoverMoreDesc': 'Aproveite ao máximo o seu PC',
   'cc.addGameManually': 'Adicione jogos manualmente',
-  'cc.addGameManuallyDesc': 'Pelo widget Adicionar Jogo no Início você verá seus programas instalados: marque-os, escolha a plataforma e confirme. Se um jogo não aparecer, use Procurar para adicionar seu .exe.',
+  'cc.addGameManuallyDesc': 'Pelo widget Adicionar Jogo no Início você verá seus programas instalados: marque-os, escolha a plataforma e confirme. Se um jogo não aparecer, use Procurar para adicionar seu executável ou atalho .desktop.',
   'cc.addEmulatedGames': 'Adicione seus jogos emulados',
   'cc.addEmulatedGamesDesc': 'Crie atalhos (.lnk) dos seus jogos de emulador em uma pasta, adicione-os pelo widget Adicionar Jogo e defina a plataforma Retro com seu sistema (PS1, PS2, PSP, PS3)/ Retro com seu sistema (PSP, N64, WiiU, Wii, etc.).',
   'cc.emulatedGamesDesc2': 'No menu configurações -> emulação, gerencie e adicione seus emuladores e escaneie suas pastas de roms, por favor, certifique-se de que os arquivos dos jogos tenham o nome correto e, para jogos de PS3, certifique-se de que a pasta do jogo tenha o número de série para ler suas conquistas, se for um formato iso, adicione-o a uma pasta com o id (serial) junto com os outros jogos',
@@ -2712,7 +2712,7 @@ const pt: Record<TranslationKey, string> = {
   'edit.description': 'Descrição',
   'edit.executableLocation': 'Localização do executável ou link',
   'edit.steamLaunch': 'Lançamento via Steam',
-  'edit.selectNewExe': 'Selecionar novo executável (.exe)',
+  'edit.selectNewExe': 'Selecionar novo executável',
   'edit.currentPath': 'Caminho atual do jogo:',
   'edit.noPath': 'Não selecionado',
   'edit.launchArgs': 'Parâmetros de inicialização',
@@ -2769,7 +2769,7 @@ const pt: Record<TranslationKey, string> = {
 
   'add.title': 'Adicionar Nova Aplicação',
   'add.appName': 'Nome da Aplicação',
-  'add.selectExe': 'Selecionar Executável (.exe)',
+  'add.selectExe': 'Selecionar Executável',
   'add.path': 'Caminho: ...{path}',
   'add.coverOptional': 'Capa (Opcional - Auto-fetch)',
   'add.cover': 'Capa: ...{path}',
