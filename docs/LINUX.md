@@ -7,14 +7,14 @@ Este fork conserva la interfaz de FifthStation y agrega integración Linux al la
 ### AppImage
 
 ```sh
-chmod +x WPS5-Linux-1.1.5-x86_64.AppImage
-./WPS5-Linux-1.1.5-x86_64.AppImage
+chmod +x WPS5-Linux-1.1.6-x86_64.AppImage
+./WPS5-Linux-1.1.6-x86_64.AppImage
 ```
 
 Si no tienes FUSE, puedes extraer y ejecutar el contenido:
 
 ```sh
-./WPS5-Linux-1.1.5-x86_64.AppImage --appimage-extract
+./WPS5-Linux-1.1.6-x86_64.AppImage --appimage-extract
 ./squashfs-root/AppRun
 ```
 
@@ -27,7 +27,7 @@ Requiere **Flatpak 1.16 o posterior**, porque el paquete pide acceso específica
 ```sh
 flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 flatpak install --user flathub org.freedesktop.Platform//25.08
-flatpak install --user ./WPS5-Linux-1.1.5-x86_64.flatpak
+flatpak install --user ./WPS5-Linux-1.1.6-x86_64.flatpak
 flatpak run io.github.xXKuroiKenshiXx.WPS5Linux
 ```
 

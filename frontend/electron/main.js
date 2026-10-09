@@ -6,6 +6,7 @@ const zlib = require('zlib');
 const { exec, spawn, fork } = require('child_process');
 const { pathToFileURL } = require('url');
 const http = require('http');
+const { listenLoopback } = require('./localServer');
 const linux = process.platform === 'linux' ? require('./linux') : null;
 const linuxMedia = linux ? require('./linuxMedia') : null;
 let stopLinuxGamepad = null;
@@ -98,15 +99,7 @@ function createLocalStaticServer(rootDir) {
       }
     });
 
-    server.on('error', reject);
-
-    // Puerto fijo (más predecible para logs/depuración); si algún día
-    // choca con otro proceso, se puede cambiar a 0 para que el SO asigne
-    // uno libre automáticamente.
-    const PREFERRED_PORT = 47821;
-    server.listen(PREFERRED_PORT, '127.0.0.1', () => {
-      resolve(server.address().port);
-    });
+    listenLoopback(server, process.platform === 'win32' ? 0 : 47821).then(resolve, reject);
   });
 }
 

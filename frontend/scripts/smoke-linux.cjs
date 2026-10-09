@@ -19,11 +19,11 @@ const assert=require('node:assert/strict');
   try{
     let pages;
     for(let i=0;i<120;i++){
-      try{pages=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();if(pages.some(p=>p.type==='page'&&p.url.includes('47821')))break;}catch{}
+      try{pages=await(await fetch(`http://127.0.0.1:${port}/json/list`)).json();if(pages.some(p=>p.type==='page'&&/^http:\/\/127\.0\.0\.1:\d+\//.test(p.url)))break;}catch{}
       if(child.exitCode!==null)throw Error('Launcher exited: '+logs);
       await new Promise(r=>setTimeout(r,250));
     }
-    const page=pages?.find(p=>p.type==='page'&&p.url.includes('47821'));assert.ok(page,'Packaged UI did not load: '+logs);
+    const page=pages?.find(p=>p.type==='page'&&/^http:\/\/127\.0\.0\.1:\d+\//.test(p.url));assert.ok(page,'Packaged UI did not load: '+logs);
     ws=new WebSocket(page.webSocketDebuggerUrl);await once(ws,'open');
     let id=0;const pending=new Map();
     ws.addEventListener('message',event=>{const message=JSON.parse(event.data);if(message.id&&pending.has(message.id)){pending.get(message.id)(message);pending.delete(message.id);}});

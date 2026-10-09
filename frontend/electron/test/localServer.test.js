@@ -1,0 +1,5 @@
+'use strict';
+const {test}=require('node:test');const assert=require('node:assert/strict');const http=require('node:http');
+const {listenLoopback}=require('../localServer');
+test('local UI server binds only loopback and serves on an OS-assigned port',async t=>{const server=http.createServer((req,res)=>res.end('launcher'));t.after(()=>new Promise(r=>server.close(r)));const port=await listenLoopback(server,0);assert.equal(server.address().address,'127.0.0.1');assert.equal(await(await fetch('http://127.0.0.1:'+port)).text(),'launcher');});
+test('an occupied launcher port falls back to a free loopback port',async t=>{const occupied=http.createServer();const taken=await listenLoopback(occupied,0);t.after(()=>new Promise(r=>occupied.close(r)));const server=http.createServer((req,res)=>res.end('recovered'));t.after(()=>new Promise(r=>server.close(r)));const actual=await listenLoopback(server,taken);assert.notEqual(actual,taken);assert.equal(await(await fetch('http://127.0.0.1:'+actual)).text(),'recovered');});

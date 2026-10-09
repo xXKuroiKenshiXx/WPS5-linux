@@ -2,6 +2,8 @@
 
 Fork para Linux con paquetes AppImage y Flatpak, integración de Steam, aplicaciones Linux y emuladores.
 
+La versión Linux 1.1.6 incorpora el último cambio upstream de lanzamiento RPCS3 y recuperación de un puerto de interfaz ocupado.
+
 Consulta la [guía Linux](docs/LINUX.md) para instalar, compilar, configurar bibliotecas y revisar el alcance de compatibilidad y las pruebas pendientes.
 
 

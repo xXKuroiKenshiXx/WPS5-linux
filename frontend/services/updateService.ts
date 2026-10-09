@@ -6,5 +6,5 @@ export async function fetchLatestRelease(): Promise<{ version: string; link: str
   if (response.status === 404) return { version: currentVersion, link: releasesUrl };
   if (!response.ok) throw new Error('Could not check Linux releases');
   const release = await response.json() as { tag_name: string; html_url: string };
-  return { version: release.tag_name.replace(/^v/, ''), link: release.html_url };
+  return { version: release.tag_name.replace(/^v\.?/, ''), link: release.html_url };
 }

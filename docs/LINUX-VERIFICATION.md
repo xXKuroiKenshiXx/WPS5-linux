@@ -1,6 +1,6 @@
 # Verificación del port Linux
 
-Fecha: 2026-10-06. Código local en la rama `linux-port`, basado en `065a905`.
+Fecha: 2026-10-09. Versión Linux 1.1.6, basada en el último upstream `01fd8a79d4d38d668bce1af903b5d6c370bc9641` (2026-10-07), además del port Linux existente.
 
 ## Entorno
 
@@ -8,7 +8,7 @@ Ubuntu 24.04.5 x86_64 dentro de WSL, Node.js 22.23.3, Electron 41 y Xvfb. Flatpa
 
 ## Comprobaciones
 
-- 16 pruebas automatizadas aprobadas: argumentos y entradas `.desktop`, detección de Steam/emuladores, almacenamiento, batería, Wine, botones evdev, ciclo real de procesos y control real de un reproductor MPRIS de prueba.
+- 18 pruebas automatizadas aprobadas: argumentos y entradas `.desktop`, detección de Steam/emuladores, almacenamiento, batería, Wine, botones evdev, ciclo real de procesos y control real de un reproductor MPRIS de prueba y servidor HTTP de interfaz con puerto dinámico/fallback ante puerto ocupado.
 - `npx tsc --noEmit` aprobado.
 - Backend CommonJS y exportación web compilados.
 - Los dos paquetes se prueban con `scripts/smoke-linux.cjs`: interfaz, preload, backend HTTP, programas, almacenamiento, error ante un ejecutable inexistente y apertura/retorno de un proceso externo.
