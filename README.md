@@ -2,7 +2,7 @@
 
 Fork para Linux con paquetes AppImage y Flatpak, integración de Steam, aplicaciones Linux y emuladores.
 
-La versión Linux 1.1.6 incorpora el último cambio upstream de lanzamiento RPCS3 y recuperación de un puerto de interfaz ocupado.
+La versión Linux 1.1.7 fusiona este port con lo útil de la rama `linux` del proyecto original: corrige fondos, capturas, avatares y música locales que no cargaban en Linux, lanza `.exe` con Proton (o Wine) y avisa cuando un juego no se puede iniciar. Incluye el último `main` upstream.
 
 Consulta la [guía Linux](docs/LINUX.md) para instalar, compilar, configurar bibliotecas y revisar el alcance de compatibilidad y las pruebas pendientes.
 

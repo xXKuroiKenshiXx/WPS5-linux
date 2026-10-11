@@ -2199,11 +2199,16 @@ app.whenReady().then(async () => {
         if (/^[a-zA-Z]\//.test(filePath)) {
           filePath = filePath[0] + ':' + filePath.slice(1);
         }
+      } else if (!filePath.startsWith('/')) {
+        // Esquema estándar: Chromium canoniza local-file:////home/u/x.jpg como
+        // local-file://home/u/x.jpg (el primer segmento pasa a ser el host),
+        // así que se restaura la barra inicial de la ruta absoluta.
+        filePath = '/' + filePath;
       }
 
       // Convertimos la ruta a un formato de URL de archivo válido
       const fileUrl = pathToFileURL(path.normalize(filePath)).toString();
-      return net.fetch(fileUrl);
+      return await net.fetch(fileUrl);
     } catch (err) {
       console.error('Protocol error:', err);
       return new Response('Error loading local file', { status: 500 });

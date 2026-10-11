@@ -1,7 +1,7 @@
 {
   "name": "wps5-linux",
   "main": "expo-router/entry",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "scripts": {
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
@@ -183,6 +183,9 @@
         "--filesystem=~/.wine:ro",
         "--filesystem=xdg-data/Goldberg SteamEmu Saves:ro",
         "--filesystem=xdg-data/GSE Saves:ro",
+        "--filesystem=xdg-config/Goldberg SteamEmu Saves:ro",
+        "--filesystem=xdg-config/GSE Saves:ro",
+        "--filesystem=xdg-data/wps5:ro",
         "--filesystem=~/.steam:ro",
         "--filesystem=~/.local/share/Steam:ro",
         "--filesystem=~/.var/app/com.valvesoftware.Steam:ro",

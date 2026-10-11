@@ -35,6 +35,11 @@ const assert=require('node:assert/strict');
     const result=await evaluate(`(async()=>({platform:window.electronAPI.platform, storage:await window.electronAPI.getStorageInfo(),programs:await window.electronAPI.getInstalledPrograms(),apps:await window.electronAPI.getApps(),batteries:await window.electronAPI.getPsBatteries(),media:await window.electronAPI.getMediaSessions()}))()`);
     assert.equal(result.platform,'linux');assert.equal(result.storage.success,true);assert.equal(result.programs.success,true);assert.ok(Array.isArray(result.media));assert.ok(result.apps);
     if(process.env.SMOKE_EXPECT_PROGRAM) assert.ok(result.programs.programs.some(p=>p.name===process.env.SMOKE_EXPECT_PROGRAM),'Host user desktop entry must be discoverable from the package');
+    // Wallpapers, screenshots and avatars are built as local-file:///<absolute path> by the UI.
+    const pixel=path.join(dir,'My Pictures','pixel.png');await fs.mkdir(path.dirname(pixel));
+    await fs.writeFile(pixel,Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=','base64'));
+    const localFile=await evaluate(`new Promise(r=>{const i=new Image();i.onload=()=>r(i.naturalWidth);i.onerror=()=>r(0);i.src=${JSON.stringify('local-file:///'+pixel)};})`);
+    assert.equal(localFile,1,'local-file:// must load absolute Linux paths');
     const failure=await evaluate(`window.electronAPI.launchApp(null,'/definitely/missing/wps5-game')`);assert.equal(failure.success,false);
     const launch=await evaluate(`window.electronAPI.launchApp(null,'/bin/sleep','"2"')`);assert.equal(launch.success,true);
     await new Promise(r=>setTimeout(r,4000));
@@ -43,7 +48,7 @@ const assert=require('node:assert/strict');
     await new Promise(r=>setTimeout(r,7000));
     const shot=await send('Page.captureScreenshot',{format:'png'});
     const output=path.join(frontend,'dist-electron/linux-smoke.png');await fs.writeFile(output,Buffer.from(shot.result.data,'base64'));
-    const report={platform:result.platform,programs:result.programs.programs.length,storage:result.storage.disks,launchAndReturn:true,backend:true,screenshot:output};
+    const report={platform:result.platform,programs:result.programs.programs.length,storage:result.storage.disks,localFile:true,launchAndReturn:true,backend:true,screenshot:output};
     await fs.writeFile(path.join(frontend,'dist-electron/linux-smoke.json'),JSON.stringify(report,null,2));
     console.log(JSON.stringify(report,null,2));
   }finally{

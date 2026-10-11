@@ -212,9 +212,21 @@ async function resolveLaunch(executable, extraArgs = '') {
     if (!/^[\w-]+(?:\.[\w-]+){2,}$/.test(id)) throw new Error('Invalid Flatpak application ID');
     command = 'flatpak'; args = ['run', id, ...args];
   } else if (/\.exe$/i.test(command)) {
-    const wine = await findCommand('wine');
-    if (!wine) throw new Error('Use Steam/Proton or install Wine to launch Windows executables');
-    args = [command, ...args]; command = wine; cwd = path.dirname(executable);
+    cwd = path.dirname(executable);
+    const proton = findProton();
+    if (proton) {
+      // The launcher owns this prefix; Steam's compatdata prefixes are never reused.
+      const prefix = protonPrefix();
+      if (isFlatpak()) await runHost('mkdir', ['-p', prefix]); else await fsp.mkdir(prefix, { recursive: true });
+      killHungSteamForwarders(path.join(prefix, 'pfx'));
+      args = [`STEAM_COMPAT_CLIENT_INSTALL_PATH=${proton.steamRoot}`, `STEAM_COMPAT_DATA_PATH=${prefix}`,
+        'sh', '-c', 'ulimit -n 524288 2>/dev/null || true; exec "$@"', 'wps5-proton', proton.path, 'run', command, ...args];
+      command = 'env';
+    } else {
+      const wine = await findCommand('wine');
+      if (!wine) throw new Error('wine_missing');
+      args = [command, ...args]; command = wine;
+    }
   } else if (/\.(bat|lnk)$/i.test(command)) {
     throw new Error('Choose the Linux executable or a .desktop shortcut');
   }
@@ -228,9 +240,57 @@ function steamCandidates(env = process.env, userHome = home) {
     path.join(userHome, '.steam/steam'), path.join(userHome, '.steam/root'), path.join(userHome, '.local/share/Steam'),
     path.join(env.WPS5_HOST_DATA_HOME || env.XDG_DATA_HOME || path.join(userHome, '.local/share'), 'Steam'),
     path.join(userHome, '.var/app/com.valvesoftware.Steam/.local/share/Steam'),
+    path.join(userHome, '.var/app/com.valvesoftware.Steam/data/Steam'),
   ])];
 }
 function getSteamPath() { return steamCandidates().find(p => fs.existsSync(path.join(p, 'steamapps'))) || null; }
+
+function dataHome() { return process.env.WPS5_HOST_DATA_HOME || process.env.XDG_DATA_HOME || path.join(home, '.local/share'); }
+function protonPrefix() { return path.join(dataHome(), 'wps5/proton_prefix'); }
+
+// Experimental first, then the highest version (Valve or GE); Hotfix builds last.
+function protonRank(name) {
+  if (/hotfix/i.test(name)) return -1;
+  if (/experimental/i.test(name)) return Infinity;
+  return parseFloat((name.match(/\d+(?:\.\d+)?/) || ['0'])[0]);
+}
+function findProton(roots = steamCandidates()) {
+  const found = [];
+  const dirs = roots.flatMap(root => [[path.join(root, 'compatibilitytools.d'), root], [path.join(root, 'steamapps/common'), root]]);
+  if (!isFlatpak()) dirs.push(['/usr/share/steam/compatibilitytools.d', getSteamPath() || roots[0]]);
+  for (const [dir, steamRoot] of dirs) {
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { continue; }
+    for (const name of entries) {
+      const file = path.join(dir, name, 'proton');
+      if (/proton/i.test(name) && fs.existsSync(file)) found.push({ name, path: file, steamRoot });
+    }
+  }
+  found.sort((a, b) => protonRank(b.name) - protonRank(a.name) || b.name.localeCompare(a.name, undefined, { numeric: true }));
+  return found[0] || null;
+}
+
+// Games that call steam://run leave a Wine steam.exe forwarder alive in the
+// prefix; while it exists some anti-cheats (e.g. mhypbase) crash on start.
+function killHungSteamForwarders(prefix) {
+  if (isFlatpak()) return 0; // host /proc is not visible from the sandbox
+  let killed = 0;
+  let entries;
+  try { entries = fs.readdirSync('/proc'); } catch { return 0; }
+  for (const pid of entries) {
+    if (!/^\d+$/.test(pid) || Number(pid) === process.pid) continue;
+    try {
+      const args = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+      if (!args[0]?.toLowerCase().endsWith('steam.exe') || !args.slice(1).some(a => /^steam:\/\//i.test(a))) continue;
+      const wineprefix = fs.readFileSync(`/proc/${pid}/environ`, 'utf8').split('\0').find(v => v.startsWith('WINEPREFIX='));
+      const value = wineprefix?.slice('WINEPREFIX='.length).replace(/\/+$/, '');
+      if (!value || (value !== prefix && !value.startsWith(prefix + '/'))) continue;
+      process.kill(Number(pid), 'SIGKILL');
+      killed++;
+    } catch { /* process exited or belongs to another user */ }
+  }
+  return killed;
+}
 
 // Exact directory boundaries prevent /Games/Foo from matching /Games/Foobar.
 const processProbe = `
@@ -332,7 +392,7 @@ function getEpicInstalledGames() {
 }
 
 function winePrefixes(appId) {
-  const prefixes = [process.env.WINEPREFIX, path.join(home, '.wine')].filter(Boolean);
+  const prefixes = [process.env.WINEPREFIX, path.join(home, '.wine'), path.join(protonPrefix(), 'pfx')].filter(Boolean);
   if (/^\d+$/.test(String(appId))) {
     for (const root of steamCandidates()) {
       const libraries = [root];
@@ -346,8 +406,8 @@ function winePrefixes(appId) {
   return [...new Set(prefixes)].filter(p => fs.existsSync(path.join(p, 'drive_c')));
 }
 function achievementSearchPaths(appId) {
-  const data = process.env.WPS5_HOST_DATA_HOME || process.env.XDG_DATA_HOME || path.join(home, '.local/share');
-  const paths = [{base:path.join(data,'Goldberg SteamEmu Saves'),source:'Goldberg'}, {base:path.join(data,'GSE Saves'),source:'Goldberg (GSE)'}];
+  const config = process.env.WPS5_HOST_CONFIG_HOME || process.env.XDG_CONFIG_HOME || path.join(home, '.config');
+  const paths = [dataHome(), config].flatMap(base => [{base:path.join(base,'Goldberg SteamEmu Saves'),source:'Goldberg'}, {base:path.join(base,'GSE Saves'),source:'Goldberg (GSE)'}]);
   for (const prefix of winePrefixes(appId)) {
     const users = path.join(prefix,'drive_c/users');
     try {
@@ -394,5 +454,5 @@ async function init() {
   } catch { /* standard XDG locations still work */ }
 }
 module.exports = { winePrefixes, achievementSearchPaths, parseWineAchievements, readWineAchievements, init, isFlatpak, runHost, cleanEnvironment, spawnExternal, splitArgs, parseDesktop,
-  applicationDirs, getInstalledPrograms, detectEmulator, resolveLaunch, steamCandidates, getSteamPath,
+  applicationDirs, getInstalledPrograms, detectEmulator, resolveLaunch, steamCandidates, getSteamPath, findProton, protonPrefix,
   processesUnderDir, killProcessTree, killProcessesUnderDir, getStorageInfo, rpcs3DataDir, getPsBatteries, getEpicInstalledGames };

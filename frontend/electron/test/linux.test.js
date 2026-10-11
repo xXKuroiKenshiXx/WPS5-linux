@@ -120,3 +120,33 @@ test('Wine registry achievement data preserves unlock times and honors opt-out',
   assert.deepEqual(result.get('FIRST'),{achieved:true,unlockTime:255});
   assert.equal(linux.parseWineAchievements(text.replace('"SkipStatsAndAchievements"=dword:00000000','"SkipStatsAndAchievements"=dword:00000001'),123),null);
 });
+test('Proton selection prefers Experimental, then the newest version, and leaves Hotfix last', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'wps5-steam-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  for (const [dir, name] of [['steamapps/common','Proton Hotfix'],['steamapps/common','Proton 8.0'],['compatibilitytools.d','GE-Proton10-4'],['steamapps/common','Proton 9.0']]) {
+    await fs.mkdir(path.join(root, dir, name), { recursive: true });
+    await fs.writeFile(path.join(root, dir, name, 'proton'), '');
+  }
+  assert.equal(linux.findProton([root]).name, 'GE-Proton10-4');
+  await fs.mkdir(path.join(root, 'steamapps/common/Proton - Experimental'));
+  await fs.writeFile(path.join(root, 'steamapps/common/Proton - Experimental/proton'), '');
+  const best = linux.findProton([root]);
+  assert.equal(best.name, 'Proton - Experimental'); assert.equal(best.steamRoot, root);
+  assert.equal(linux.findProton([path.join(root, 'missing')]), null);
+});
+test('Windows executables use Proton with the launcher prefix, or report missing Wine', {skip:process.platform!=='linux'}, async t => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'wps5-exe-'));
+  const saved = process.env.XDG_DATA_HOME;
+  t.after(async () => { if (saved === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = saved; await fs.rm(dir, { recursive: true, force: true }); });
+  process.env.XDG_DATA_HOME = path.join(dir, 'data');
+  const exe = path.join(dir, 'My Game', 'game.exe');
+  await fs.mkdir(path.dirname(exe)); await fs.writeFile(exe, '');
+  if (!linux.findProton() && !require('node:fs').existsSync('/usr/bin/wine')) await assert.rejects(linux.resolveLaunch(exe), /wine_missing/);
+  await fs.mkdir(path.join(dir, 'data/Steam/steamapps/common/Proton - Experimental'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'data/Steam/steamapps/common/Proton - Experimental/proton'), '');
+  const plan = await linux.resolveLaunch(exe, '-windowed');
+  assert.equal(path.basename(plan.command), 'env');
+  assert.equal(plan.cwd, path.dirname(exe));
+  assert.ok(plan.args.includes(`STEAM_COMPAT_DATA_PATH=${path.join(dir, 'data/wps5/proton_prefix')}`));
+  assert.deepEqual(plan.args.slice(-3), ['run', exe, '-windowed']);
+});

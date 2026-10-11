@@ -1,20 +1,20 @@
 # WPS5 Linux
 
-Este fork conserva la interfaz de FifthStation y agrega integración Linux al launcher. Los paquetes son para **x86_64**. El launcher no incluye emuladores, ROMs, BIOS, Steam, Wine ni Proton: utiliza las instalaciones del usuario.
+Este fork conserva la interfaz de FifthStation y agrega integración Linux al launcher. Desde 1.1.7 incorpora también lo aprovechable de la rama `linux` del proyecto original (rutas de archivos locales, Proton para `.exe`, rutas extra de Steam Flatpak y Goldberg). Los paquetes son para **x86_64**. El launcher no incluye emuladores, ROMs, BIOS, Steam, Wine ni Proton: utiliza las instalaciones del usuario.
 
 ## Instalar
 
 ### AppImage
 
 ```sh
-chmod +x WPS5-Linux-1.1.6-x86_64.AppImage
-./WPS5-Linux-1.1.6-x86_64.AppImage
+chmod +x WPS5-Linux-1.1.7-x86_64.AppImage
+./WPS5-Linux-1.1.7-x86_64.AppImage
 ```
 
 Si no tienes FUSE, puedes extraer y ejecutar el contenido:
 
 ```sh
-./WPS5-Linux-1.1.6-x86_64.AppImage --appimage-extract
+./WPS5-Linux-1.1.7-x86_64.AppImage --appimage-extract
 ./squashfs-root/AppRun
 ```
 
@@ -27,7 +27,7 @@ Requiere **Flatpak 1.16 o posterior**, porque el paquete pide acceso específica
 ```sh
 flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 flatpak install --user flathub org.freedesktop.Platform//25.08
-flatpak install --user ./WPS5-Linux-1.1.6-x86_64.flatpak
+flatpak install --user ./WPS5-Linux-1.1.7-x86_64.flatpak
 flatpak run io.github.xXKuroiKenshiXx.WPS5Linux
 ```
 
@@ -39,7 +39,7 @@ El bundle es instalable localmente. La publicación en Flathub requiere un proce
 - Examinar acepta ejecutables Linux sin extensión, scripts ejecutables y AppImages. El archivo debe tener permiso de ejecución. Los argumentos se pasan como una lista, conservando rutas con espacios; no se interpreta una línea de shell automáticamente.
 - Steam se detecta en `~/.steam`, `~/.local/share/Steam`, XDG y la instalación Flatpak. Se leen las bibliotecas adicionales de `libraryfolders.vdf`. Steam decide cuándo usar Proton.
 - Heroic/Legendary se detecta desde sus registros de juegos instalados. El lanzamiento usa Heroic; el cliente debe estar instalado y registrar su protocolo.
-- Los `.exe` manuales requieren Wine disponible en el host. Para juegos de Windows con Proton, usa la entrada de Steam o el acceso `.desktop` de tu gestor. Los `.lnk` y `.bat` de Windows deben sustituirse por accesos o ejecutables Linux.
+- Los `.exe` manuales se ejecutan con el Proton instalado por Steam (prioridad: Proton Experimental, después la versión más nueva de Proton o GE-Proton en `compatibilitytools.d`) usando un prefijo propio del launcher en `~/.local/share/wps5/proton_prefix`; no se reutilizan los prefijos `compatdata` de Steam ni hace falta tener Steam abierto. Si no hay Proton se usa `wine` del host, y si tampoco existe el launcher lo avisa. Para juegos comprados en Steam conviene usar su entrada de Steam. Los `.lnk` y `.bat` de Windows deben sustituirse por accesos o ejecutables Linux.
 - DuckStation, PCSX2, RPCS3, PPSSPP, Dolphin, RetroArch y Ryujinx/Eden se buscan en PATH, accesos `.desktop`, Flatpak y AppImages ejecutables en ubicaciones habituales. Si no se detectan, elige el ejecutable manualmente. Cada emulador conserva sus requisitos propios de BIOS, firmware, cores y drivers.
 - Las ROMs conservan mayúsculas/minúsculas y se guarda su ruta por separado de los argumentos. Los trofeos RPCS3 usan la carpeta que contiene `dev_hdd0`, normalmente `~/.config/rpcs3` o los datos de su Flatpak, en vez de asumir que viven junto al ejecutable.
 - Los logros locales admiten los archivos existentes del proyecto y rutas de datos nativas, Wine y prefijos Proton de Steam. Los registros de logros compatibles de Wine se leen como datos de texto. La disponibilidad real depende del formato y del juego.
