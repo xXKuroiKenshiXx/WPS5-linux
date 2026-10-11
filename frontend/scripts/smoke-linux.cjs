@@ -36,9 +36,11 @@ const assert=require('node:assert/strict');
     assert.equal(result.platform,'linux');assert.equal(result.storage.success,true);assert.equal(result.programs.success,true);assert.ok(Array.isArray(result.media));assert.ok(result.apps);
     if(process.env.SMOKE_EXPECT_PROGRAM) assert.ok(result.programs.programs.some(p=>p.name===process.env.SMOKE_EXPECT_PROGRAM),'Host user desktop entry must be discoverable from the package');
     // Wallpapers, screenshots and avatars are built as local-file:///<absolute path> by the UI.
-    const pixel=path.join(dir,'My Pictures','pixel.png');await fs.mkdir(path.dirname(pixel));
+    // Flatpak only sees granted folders (e.g. ~/Pictures), not the host /tmp: set SMOKE_LOCAL_FILE_DIR there.
+    const pixel=path.join(process.env.SMOKE_LOCAL_FILE_DIR||dir,'My Pictures','pixel.png');await fs.mkdir(path.dirname(pixel),{recursive:true});
     await fs.writeFile(pixel,Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=','base64'));
-    const localFile=await evaluate(`new Promise(r=>{const i=new Image();i.onload=()=>r(i.naturalWidth);i.onerror=()=>r(0);i.src=${JSON.stringify('local-file:///'+pixel)};})`);
+    let localFile=0;
+    for(let i=0;i<20&&localFile!==1;i++){localFile=await evaluate(`new Promise(r=>{const i=new Image();i.onload=()=>r(i.naturalWidth);i.onerror=()=>r(0);i.src=${JSON.stringify('local-file:///'+pixel)};})`).catch(()=>0);if(localFile!==1)await new Promise(r=>setTimeout(r,500));}
     assert.equal(localFile,1,'local-file:// must load absolute Linux paths');
     const failure=await evaluate(`window.electronAPI.launchApp(null,'/definitely/missing/wps5-game')`);assert.equal(failure.success,false);
     const launch=await evaluate(`window.electronAPI.launchApp(null,'/bin/sleep','"2"')`);assert.equal(launch.success,true);
