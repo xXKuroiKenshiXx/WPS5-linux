@@ -2,7 +2,7 @@
 
 Fork para Linux con paquetes AppImage y Flatpak, integración de Steam, aplicaciones Linux y emuladores.
 
-La versión Linux 1.1.7 fusiona este port con lo útil de la rama `linux` del proyecto original: corrige fondos, capturas, avatares y música locales que no cargaban en Linux, lanza `.exe` con Proton (o Wine) y avisa cuando un juego no se puede iniciar. Incluye el último `main` upstream.
+La versión Linux 1.1.8 incorpora el `main` upstream del 21/10/2026 (selector y ajustes de música, logros en pantalla y notificaciones de trofeos, optimización de vídeos y caché, transiciones de fondos y frecuencia de refresco sincronizada) sobre el port Linux: archivos locales, Proton/Wine para `.exe`, Flatpak, `.desktop` y Heroic. Xbox Game Pass es exclusivo de Windows.
 
 Consulta la [guía Linux](docs/LINUX.md) para instalar, compilar, configurar bibliotecas y revisar el alcance de compatibilidad y las pruebas pendientes.
 

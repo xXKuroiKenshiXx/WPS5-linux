@@ -1,6 +1,6 @@
 # Verificación del port Linux
 
-Fecha: 2026-10-11. Versión Linux 1.1.7, basada en el último upstream `01fd8a79d4d38d668bce1af903b5d6c370bc9641` (2026-10-07) más lo aprovechable de la rama `linux` upstream (`f2981b6`). Compilada desde un clon limpio del repositorio.
+Fecha: 2026-10-23. Versión Linux 1.1.8, basada en el último upstream `73329b0a801f08a6d44a9e2d26ce17b75bdc1a81` (2026-10-21) más lo aprovechable de la rama `linux` upstream (`f2981b6`). Compilada desde un clon limpio del repositorio.
 
 ## Entorno
 

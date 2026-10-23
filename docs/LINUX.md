@@ -1,20 +1,20 @@
 # WPS5 Linux
 
-Este fork conserva la interfaz de FifthStation y agrega integración Linux al launcher. Desde 1.1.7 incorpora también lo aprovechable de la rama `linux` del proyecto original (rutas de archivos locales, Proton para `.exe`, rutas extra de Steam Flatpak y Goldberg). Los paquetes son para **x86_64**. El launcher no incluye emuladores, ROMs, BIOS, Steam, Wine ni Proton: utiliza las instalaciones del usuario.
+Este fork conserva la interfaz de FifthStation y agrega integración Linux al launcher. Desde 1.1.8 incorpora también lo aprovechable de la rama `linux` del proyecto original (rutas de archivos locales, Proton para `.exe`, rutas extra de Steam Flatpak y Goldberg). Los paquetes son para **x86_64**. El launcher no incluye emuladores, ROMs, BIOS, Steam, Wine ni Proton: utiliza las instalaciones del usuario.
 
 ## Instalar
 
 ### AppImage
 
 ```sh
-chmod +x WPS5-Linux-1.1.7-x86_64.AppImage
-./WPS5-Linux-1.1.7-x86_64.AppImage
+chmod +x WPS5-Linux-1.1.8-x86_64.AppImage
+./WPS5-Linux-1.1.8-x86_64.AppImage
 ```
 
 Si no tienes FUSE, puedes extraer y ejecutar el contenido:
 
 ```sh
-./WPS5-Linux-1.1.7-x86_64.AppImage --appimage-extract
+./WPS5-Linux-1.1.8-x86_64.AppImage --appimage-extract
 ./squashfs-root/AppRun
 ```
 
@@ -27,7 +27,7 @@ Requiere **Flatpak 1.16 o posterior**, porque el paquete pide acceso específica
 ```sh
 flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 flatpak install --user flathub org.freedesktop.Platform//25.08
-flatpak install --user ./WPS5-Linux-1.1.7-x86_64.flatpak
+flatpak install --user ./WPS5-Linux-1.1.8-x86_64.flatpak
 flatpak run io.github.xXKuroiKenshiXx.WPS5Linux
 ```
 

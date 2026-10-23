@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
+import { gamepadService } from '@/services/gamepadService';
 
 interface GamepadInfo {
   connected: boolean;
@@ -64,23 +65,44 @@ export function useGamepadInput({
       }
     };
 
+    // El Gamepad API no necesita una frecuencia de muestreo alta. En un
+    // monitor de 165 Hz, hacer el poll en cada requestAnimationFrame lo
+    // multiplicaba por 165 (con la correspondiente asignación de arrays) y
+    // competía con el compositor por los frames. Con 60 Hz hay margen de
+    // sobra y las pulsaciones siguen siendo igual de precisas.
+    const POLL_INTERVAL_MS = 1000 / 60;
+    let lastPollAt = 0;
+
     const schedulePoll = () => {
       if (!hasFocus()) {
         cancelLoop();
         return;
       }
       if (animationFrameIdRef.current === null) {
-        animationFrameIdRef.current = requestAnimationFrame(() => {
+        animationFrameIdRef.current = requestAnimationFrame((ts) => {
           animationFrameIdRef.current = null;
-          poll();
+          if (ts - lastPollAt >= POLL_INTERVAL_MS) {
+            lastPollAt = ts;
+            poll();
+          } else {
+            schedulePoll();
+          }
         });
       }
     };
 
     const isPadAlive = (p: Gamepad | null): p is Gamepad =>
       !!p && (p as any).connected !== false;
-    const getAlivePads = (): Gamepad[] =>
-      Array.from(navigator.getGamepads?.() ?? []).filter(isPadAlive);
+    const getAlivePads = (): Gamepad[] => {
+      const list = navigator.getGamepads?.();
+      if (!list) return [];
+      const alive: Gamepad[] = [];
+      for (let i = 0; i < list.length; i++) {
+        const pad = list[i];
+        if (isPadAlive(pad)) alive.push(pad);
+      }
+      return alive;
+    };
 
     const resetAllPadStates = () => {
       padStatesRef.current.clear();
@@ -233,6 +255,11 @@ export function useGamepadInput({
         return;
       }
       const pads = getAlivePads();
+
+      // Se notifica el estado global de mando: los avisos de controles
+      // (iconos de PlayStation) cambian a mostrar las teclas del teclado en
+      // cuanto el mando se conecta o se desconecta.
+      gamepadService.report(pads.length > 0);
 
       if (pads.length === 0) {
         if (lastGamepadIdRef.current !== null) {

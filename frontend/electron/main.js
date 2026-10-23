@@ -72,25 +72,75 @@ function createLocalStaticServer(rootDir) {
           return;
         }
 
+        const serveFile = (targetPath, fileStats) => {
+          const ext = path.extname(targetPath).toLowerCase();
+          const contentType = LOCAL_SERVER_MIME_TYPES[ext] || 'application/octet-stream';
+          const range = req.headers.range;
+
+          // Headers de caché: assets con hash y fuentes son inmutables
+          const isImmutableAsset = decodedPath.startsWith('/assets/') || decodedPath.startsWith('/_expo/');
+          const cacheControl = isImmutableAsset
+            ? 'public, max-age=31536000, immutable'
+            : 'no-cache';
+
+          // Soporte de Range Requests para videos / audio y streaming de memoria
+          if (range) {
+            const parts = range.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileStats.size - 1;
+
+            if (isNaN(start) || start >= fileStats.size || (parts[1] && end >= fileStats.size) || start > end) {
+              res.writeHead(416, { 'Content-Range': `bytes */${fileStats.size}` });
+              res.end();
+              return;
+            }
+
+            const chunkSize = (end - start) + 1;
+            const fileStream = fs.createReadStream(targetPath, { start, end });
+            res.writeHead(206, {
+              'Content-Range': `bytes ${start}-${end}/${fileStats.size}`,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': chunkSize,
+              'Content-Type': contentType,
+              'Cache-Control': cacheControl,
+            });
+            fileStream.pipe(res);
+            fileStream.on('error', () => {
+              if (!res.headersSent) res.writeHead(500);
+              res.end();
+            });
+          } else {
+            res.writeHead(200, {
+              'Content-Length': fileStats.size,
+              'Content-Type': contentType,
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': cacheControl,
+            });
+            const fileStream = fs.createReadStream(targetPath);
+            fileStream.pipe(res);
+            fileStream.on('error', () => {
+              if (!res.headersSent) res.writeHead(500);
+              res.end();
+            });
+          }
+        };
+
         fs.stat(filePath, (err, stats) => {
           if (err || !stats.isFile()) {
             // SPA fallback: cualquier ruta no encontrada -> index.html
-            // (necesario para el enrutado por historial de expo-router)
-            filePath = path.join(rootDir, 'index.html');
+            const fallbackPath = path.join(rootDir, 'index.html');
+            fs.stat(fallbackPath, (fallbackErr, fallbackStats) => {
+              if (fallbackErr || !fallbackStats.isFile()) {
+                res.writeHead(404);
+                res.end('Not found');
+                return;
+              }
+              serveFile(fallbackPath, fallbackStats);
+            });
+            return;
           }
 
-          const ext = path.extname(filePath).toLowerCase();
-          const contentType = LOCAL_SERVER_MIME_TYPES[ext] || 'application/octet-stream';
-
-          fs.readFile(filePath, (readErr, data) => {
-            if (readErr) {
-              res.writeHead(404);
-              res.end('Not found');
-              return;
-            }
-            res.writeHead(200, { 'Content-Type': contentType });
-            res.end(data);
-          });
+          serveFile(filePath, stats);
         });
       } catch (err) {
         console.error('[LocalServer] Error sirviendo', req.url, err);
@@ -143,20 +193,62 @@ app.commandLine.appendSwitch('enable-gpu-rasterization');
 // 3) Zero-copy: los tiles rasterizados llegan al compositor sin copias CPU→GPU.
 app.commandLine.appendSwitch('enable-zero-copy');
 
-// 4) Sin throttling cuando la ventana pierde foco u otra la tapa (p. ej. al
-//    lanzar un juego): evita el "salto" de animaciones al volver al launcher.
-app.commandLine.appendSwitch('disable-renderer-backgrounding');
-app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
-
-// 5) Backend gráfico en Windows: ANGLE sobre Direct3D 11, explícito. Chromium no
-//    usa Vulkan ni VA-API en Windows para componer, así que no se activan.
-//    Tampoco se usa disable-frame-rate-limit: es un switch de benchmarks; el
-//    compositor ya sigue la frecuencia del monitor y quitar el límite solo
-//    sube el consumo de GPU mientras se juega.
+// 4) Backend gráfico en Windows: ANGLE sobre Direct3D 11, explícito.
 if (process.platform === 'win32') {
   app.commandLine.appendSwitch('use-angle', 'd3d11');
 }
+
+// 5) Optimizaciones de memoria y V8 Heap:
+// Aumentar max-old-space-size a 1024MB para soportar interfaces con muchas imágenes y evitar caídas por OOM
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=1024 --expose-gc');
+
+// 6) Limitar tamaño de caché en disco y multimedia de Chromium para evitar fugas de memoria
+app.commandLine.appendSwitch('disk-cache-size', '67108864'); // 64 MB
+app.commandLine.appendSwitch('media-cache-size', '33554432'); // 32 MB
+
+// 7) Activar purga de scripts y suspensión de memoria en segundo plano
+app.commandLine.appendSwitch('enable-features', 'CleanScriptCaches,PurgeAndSuspendMemory');
+
+// ── Frecuencia de refresco del display (alto refresco: 120/144/165/240 Hz) ──
+// Chromium limita el frame rate del renderer a la frecuencia de refresco del
+// monitor. Con un panel de 165 Hz eso significa 165 fps (medido en esta
+// maquina: 165 fps con y sin el switch, con la ventana en el monitor de
+// 165 Hz y en el de 60 Hz).
+//
+// El switch 'disable-frame-rate-limit' elimina ese limite, pero NO sube lo
+// que se ve (el panel no puede mostrar mas de 165 Hz) y si multiplica el
+// consumo de CPU: en las mismas mediciones paso de ~3% a ~17%. Por eso NO
+// se activa por defecto.
+//
+// Se deja disponible como opcion "Sin tope" para los setups en los que
+// Chromium se queda enganchado a 60 Hz por un driver o una configuracion de
+// multi-monitor: el contador de fps de Ajustes permite comprobarlo.
+//
+// La preferencia (Ajustes -> GPU & Performance) se persiste en
+// userData/perf-settings.json y se lee ANTES de crear la ventana, porque los
+// command-line switches solo surten efecto al arrancar el proceso.
+const PERF_SETTINGS_PATH = path.join(app.getPath('userData'), 'perf-settings.json');
+
+// 'auto' (por defecto) | 'on' | 'off'
+let highRefreshMode = 'auto';
+
+try {
+  if (fs.existsSync(PERF_SETTINGS_PATH)) {
+    const parsed = JSON.parse(fs.readFileSync(PERF_SETTINGS_PATH, 'utf8'));
+    if (parsed && (parsed.highRefreshMode === 'on' || parsed.highRefreshMode === 'off')) {
+      highRefreshMode = parsed.highRefreshMode;
+    }
+  }
+} catch (err) {
+  console.warn('[Perf] No se pudo leer perf-settings.json:', err.message);
+}
+
+if (highRefreshMode === 'on') {
+  app.commandLine.appendSwitch('disable-frame-rate-limit');
+  console.log('[Perf] Limite de frames de Chromium desactivado (modo: on)');
+} else {
+  console.log(`[Perf] El frame rate sigue la frecuencia del monitor (modo: ${highRefreshMode})`);
+}
 
 // Si el proceso GPU se cae, Chromium puede pasar a render por software sin
 // avisar; este log permite detectarlo.
@@ -192,9 +284,19 @@ let mainWindow = null;
 let webMediaWindow = null;
 let toastOverlayWindow = null;
 let toastOverlayTimer = null;
+
+// ── Trophy notification windows (una cola: se muestran secuencialmente) ──────
+let trophyNotifQueue = [];   // [{ achievement, gameInfo }]
+let trophyNotifWindow = null;
+let trophyNotifBusy = false;
+let activeSteamCreds = null; // { steamId, apiKey }
+
+// ── Pollers de logros en juego: id -> { intervalId, lastUnlocked, ... } ───────
+const trophyPollerMap = new Map();
 let backendProcess = null;
 let mediaSessionsUnsubscribe = null;
 let mediaSessionsPollTimer = null;
+let downloadParseInterval = null;
 let wps5WebMediaHint = null;
 let windowsMediaSessionsModule = null;
 let trayIcon = null;
@@ -488,6 +590,32 @@ function stopMediaSessionsBridge() {
   }
 }
 
+// ── Control de tareas y polling de fondo al suspender el launcher ─────────
+function pauseBackgroundTasksForGame() {
+  try {
+    stopMediaSessionsBridge();
+  } catch (err) {
+    console.warn('[Suspend] Error deteniendo media sessions:', err?.message);
+  }
+  if (downloadParseInterval) {
+    clearInterval(downloadParseInterval);
+    downloadParseInterval = null;
+  }
+}
+
+function resumeBackgroundTasksAfterGame() {
+  try {
+    startMediaSessionsBridge();
+  } catch (err) {
+    console.warn('[Resume] Error reanudando media sessions:', err?.message);
+  }
+  if (!downloadParseInterval) {
+    downloadParseInterval = setInterval(() => {
+      broadcastDownloadProgress();
+    }, 4000);
+  }
+}
+
 const THUMB_CACHE_DIR = path.join(app.getPath('userData'), 'thumbnail-cache');
 // Ajusta calidad vs. rendimiento: más ancho = más nitidez en tiles grandes; quality 1-100
 const THUMB_MAX_WIDTH = 640;
@@ -534,6 +662,357 @@ function getOrCreateThumbnail(sourcePath, mtimeMs) {
   }
 }
 
+// ── Caché de Metadatos Persistente en Disco (IGDB, SteamGridDB, RAWG) ──────
+const METADATA_CACHE_PATH = path.join(app.getPath('userData'), 'metadata-cache.json');
+let metadataCache = {};
+
+function loadMetadataCache() {
+  try {
+    if (fs.existsSync(METADATA_CACHE_PATH)) {
+      metadataCache = JSON.parse(fs.readFileSync(METADATA_CACHE_PATH, 'utf8'));
+    } else {
+      metadataCache = {};
+    }
+  } catch (err) {
+    console.warn('[MetadataCache] Error cargando caché:', err.message);
+    metadataCache = {};
+  }
+}
+
+let saveMetadataCacheTimer = null;
+function persistMetadataCache() {
+  if (saveMetadataCacheTimer) clearTimeout(saveMetadataCacheTimer);
+  saveMetadataCacheTimer = setTimeout(() => {
+    try {
+      fs.writeFileSync(METADATA_CACHE_PATH, JSON.stringify(metadataCache, null, 2));
+    } catch (err) {
+      console.warn('[MetadataCache] Error guardando caché:', err.message);
+    }
+  }, 1000);
+}
+
+function getFromMetadataCache(key) {
+  if (!key) return null;
+  const normalizedKey = key.trim().toLowerCase();
+  const entry = metadataCache[normalizedKey];
+  return entry?.data ?? null;
+}
+
+function saveToMetadataCache(key, data) {
+  if (!key || !data) return;
+  const normalizedKey = key.trim().toLowerCase();
+  metadataCache[normalizedKey] = {
+    timestamp: Date.now(),
+    data,
+  };
+  persistMetadataCache();
+}
+
+// ── Gestor y Descargador Local de Arte de Juegos (Modo Offline) ───────────
+const GAME_MEDIA_DIR = path.join(app.getPath('userData'), 'game-media');
+
+function ensureGameMediaDir() {
+  if (!fs.existsSync(GAME_MEDIA_DIR)) {
+    fs.mkdirSync(GAME_MEDIA_DIR, { recursive: true });
+  }
+}
+
+function getMediaExtension(url) {
+  try {
+    const parsed = new URL(url);
+    const ext = path.extname(parsed.pathname).toLowerCase();
+    if (ext && ['.jpg', '.jpeg', '.png', '.webp', '.svg', '.gif', '.ico', '.mp3', '.ogg', '.flac', '.wav', '.m4a'].includes(ext)) {
+      return ext;
+    }
+  } catch (_) { }
+  return '.jpg';
+}
+
+function getMediaFileName(url) {
+  const hash = crypto.createHash('md5').update(url).digest('hex');
+  const ext = getMediaExtension(url);
+  return `${hash}${ext}`;
+}
+
+async function downloadAndCacheMedia(url) {
+  if (!url || typeof url !== 'string') return url;
+  const trimmed = url.trim();
+  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+    return trimmed; // Ya es local-file://, ruta de archivo o data: URI
+  }
+
+  ensureGameMediaDir();
+  const filename = getMediaFileName(trimmed);
+  const targetPath = path.join(GAME_MEDIA_DIR, filename);
+
+  // Si ya fue descargada previamente, devolver ruta local de inmediato (0 ms)
+  if (fs.existsSync(targetPath)) {
+    return toLocalFileUri(targetPath);
+  }
+
+  const tempPath = path.join(GAME_MEDIA_DIR, `${filename}.tmp.${Date.now()}`);
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+
+    const response = await fetch(trimmed, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) {
+      return trimmed;
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (!buffer || buffer.length === 0) {
+      return trimmed;
+    }
+
+    fs.writeFileSync(tempPath, buffer);
+    fs.renameSync(tempPath, targetPath);
+
+    return toLocalFileUri(targetPath);
+  } catch (err) {
+    if (fs.existsSync(tempPath)) {
+      try { fs.unlinkSync(tempPath); } catch (_) { }
+    }
+    // Si no hay conexión o falla, devolver URL original como fallback
+    return trimmed;
+  }
+}
+
+async function cacheAppArtwork(app) {
+  if (!app) return { app, modified: false };
+  const clone = { ...app };
+  const fields = ['image', 'backgroundImage', 'logo', 'icon'];
+  let modified = false;
+
+  for (const field of fields) {
+    const val = clone[field];
+    if (val && typeof val === 'string' && (val.startsWith('http://') || val.startsWith('https://'))) {
+      const localUri = await downloadAndCacheMedia(val);
+      if (localUri && localUri !== val) {
+        clone[field] = localUri;
+        modified = true;
+      }
+    }
+  }
+
+  return { app: clone, modified };
+}
+
+// Migración progresiva en segundo plano para convertir imágenes remotas existentes a local
+let isMediaMigrationRunning = false;
+async function migrateExistingGamesMedia() {
+  if (isMediaMigrationRunning) return;
+  isMediaMigrationRunning = true;
+
+  try {
+    if (!fs.existsSync(dbPath)) return;
+    const data = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+    const games = Array.isArray(data.games) ? data.games : [];
+    let anyModified = false;
+
+    for (let i = 0; i < games.length; i++) {
+      const game = games[i];
+      if (!game) continue;
+
+      const hasRemoteMedia = ['image', 'backgroundImage', 'logo', 'icon'].some(
+        f => game[f] && typeof game[f] === 'string' && (game[f].startsWith('http://') || game[f].startsWith('https://'))
+      );
+
+      if (hasRemoteMedia) {
+        const { app: updatedGame, modified } = await cacheAppArtwork(game);
+        if (modified) {
+          games[i] = updatedGame;
+          anyModified = true;
+
+          // Guardar progreso en disco
+          fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+
+          // Notificar a la ventana si está abierta
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('app-updated', updatedGame);
+          }
+        }
+
+        // Delay suave para no saturar ancho de banda
+        await new Promise(r => setTimeout(r, 60));
+      }
+    }
+
+    if (anyModified) {
+      console.log('[MediaCache] Todos los juegos remotos se han descargado a disco para uso offline.');
+    }
+  } catch (err) {
+    console.warn('[MediaCache] Error durante migración de arte:', err.message);
+  } finally {
+    isMediaMigrationRunning = false;
+  }
+}
+
+const normalizeIgdbTitle = (value) => String(value || '')
+  .toLowerCase()
+  .replace(/[®™©]/g, '')
+  .replace(/&/g, 'and')
+  .replace(/[^a-z0-9]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const pickBestIgdbMatch = (games, title) => {
+  if (!Array.isArray(games) || games.length === 0) return null;
+  const wanted = normalizeIgdbTitle(title);
+  const exact = games.find((g) => normalizeIgdbTitle(g?.name) === wanted);
+  if (exact) return exact;
+  const prefix = games.find((g) => {
+    const name = normalizeIgdbTitle(g?.name);
+    return name && wanted && (name.startsWith(wanted) || wanted.startsWith(name));
+  });
+  return prefix || games[0];
+};
+
+const inFlightWorkerRequests = new Map();
+
+async function fetchIgdbFullData(title) {
+  if (!title) return null;
+  const cacheKey = `igdb_raw:${title}`.trim().toLowerCase();
+  const cached = getFromMetadataCache(cacheKey);
+  if (cached) {
+    if (cached.notFound) return null;
+    return cached;
+  }
+
+  if (inFlightWorkerRequests.has(cacheKey)) {
+    return inFlightWorkerRequests.get(cacheKey);
+  }
+
+  const promise = (async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 9000);
+      const response = await fetch(`${WORKER_API_BASE}/api/game?title=${encodeURIComponent(title.trim())}`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!response.ok) {
+        saveToMetadataCache(cacheKey, { notFound: true, status: response.status });
+        return null;
+      }
+      const json = await response.json();
+      if (json.success && Array.isArray(json.games) && json.games.length > 0) {
+        saveToMetadataCache(cacheKey, json);
+        return json;
+      } else {
+        saveToMetadataCache(cacheKey, { notFound: true });
+        return null;
+      }
+    } catch (err) {
+      console.warn('[IGDB] Error consultando Worker:', err.message);
+      return null;
+    } finally {
+      inFlightWorkerRequests.delete(cacheKey);
+    }
+  })();
+
+  inFlightWorkerRequests.set(cacheKey, promise);
+  return promise;
+}
+
+async function fetchSteamGridFullData(title) {
+  if (!title) return null;
+  const cacheKey = `steamgrid_raw:${title}`.trim().toLowerCase();
+  const cached = getFromMetadataCache(cacheKey);
+  if (cached) {
+    if (cached.notFound) return null;
+    return cached;
+  }
+
+  if (inFlightWorkerRequests.has(cacheKey)) {
+    return inFlightWorkerRequests.get(cacheKey);
+  }
+
+  const promise = (async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 9000);
+      const response = await fetch(`${WORKER_API_BASE}/api/steamgrid?title=${encodeURIComponent(title.trim())}`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!response.ok) {
+        saveToMetadataCache(cacheKey, { notFound: true, status: response.status });
+        return null;
+      }
+      const json = await response.json();
+      if (json.success) {
+        saveToMetadataCache(cacheKey, json);
+        return json;
+      } else {
+        saveToMetadataCache(cacheKey, { notFound: true });
+        return null;
+      }
+    } catch (err) {
+      console.warn('[SteamGridDB] Error consultando Worker:', err.message);
+      return null;
+    } finally {
+      inFlightWorkerRequests.delete(cacheKey);
+    }
+  })();
+
+  inFlightWorkerRequests.set(cacheKey, promise);
+  return promise;
+}
+
+async function fetchRawgFullData(title) {
+  if (!title) return null;
+  const cacheKey = `rawg_raw:${title}`.trim().toLowerCase();
+  const cached = getFromMetadataCache(cacheKey);
+  if (cached) {
+    if (cached.notFound) return null;
+    return cached;
+  }
+
+  if (inFlightWorkerRequests.has(cacheKey)) {
+    return inFlightWorkerRequests.get(cacheKey);
+  }
+
+  const promise = (async () => {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 9000);
+      const res = await fetch(`${WORKER_API_BASE}/api/rawg?title=${encodeURIComponent(title.trim())}`, {
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!res.ok) {
+        saveToMetadataCache(cacheKey, { notFound: true, status: res.status });
+        return null;
+      }
+      const json = await res.json();
+      if (json.success) {
+        saveToMetadataCache(cacheKey, json);
+        return json;
+      } else {
+        saveToMetadataCache(cacheKey, { notFound: true });
+        return null;
+      }
+    } catch (err) {
+      console.warn('[RAWG] Error consultando Worker:', err.message);
+      return null;
+    } finally {
+      inFlightWorkerRequests.delete(cacheKey);
+    }
+  })();
+
+  inFlightWorkerRequests.set(cacheKey, promise);
+  return promise;
+}
+
 function storeBackendLog(...args) {
   const line = `[${new Date().toISOString()}] ${args.map(a => (a instanceof Error ? a.stack : String(a))).join(' ')}\n`;
   try {
@@ -564,6 +1043,7 @@ function startStoreBackend() {
 
   backendProcess = fork(backendEntry, [], {
     cwd: backendCwd,
+    execArgv: ['--max-old-space-size=48', '--optimize-for-size'],
     env: {
       ...process.env,
       PORT: process.env.STORE_API_PORT || '3000',
@@ -587,6 +1067,77 @@ function stopStoreBackend() {
     backendProcess.kill();
     backendProcess = null;
   }
+}
+
+// ── Frecuencia de refresco de los displays ─────────────────────────────────
+// Electron expone `display.displayFrequency`, pero en Windows no siempre
+// viene informado (0). Cuando falta, se consulta el modo de video actual
+// del adaptador mediante WMI. El resultado se cachea porque no cambia
+// durante la sesion salvo que el usuario modifique la resolucion del monitor.
+let displayRefreshCache = null;
+
+function normalizeRefreshRate(value) {
+  const rate = Math.round(Number(value) || 0);
+  // Chromium y los drivers reportan valores tipo 59.94 -> 60 o 143.86 -> 144.
+  return rate > 0 ? rate : 0;
+}
+
+function queryWindowsPrimaryRefreshRate() {
+  return new Promise((resolve) => {
+    const script =
+      "(Get-CimInstance -ClassName Win32_VideoController | " +
+      "Where-Object { $_.CurrentRefreshRate } | " +
+      "Select-Object -First 1 -ExpandProperty CurrentRefreshRate)";
+
+    exec(
+      `powershell -NoProfile -WindowStyle Hidden -Command "${script.replace(/"/g, '\\"')}"`,
+      { timeout: 8000 },
+      (err, stdout) => {
+        if (err) {
+          console.warn('[Perf] No se pudo leer la frecuencia del monitor:', err.message);
+          resolve(0);
+          return;
+        }
+        const value = normalizeRefreshRate(parseInt(String(stdout || '').trim(), 10));
+        resolve(value);
+      }
+    );
+  });
+}
+
+async function getDisplayRefreshInfo() {
+  if (displayRefreshCache) return displayRefreshCache;
+
+  const displays = screen.getAllDisplays().map((display) => ({
+    id: display.id,
+    label: display.label,
+    bounds: display.bounds,
+    scaleFactor: display.scaleFactor,
+    refreshRate: normalizeRefreshRate(display.displayFrequency),
+  }));
+
+  const primary = screen.getPrimaryDisplay();
+  let primaryRefreshRate = normalizeRefreshRate(primary?.displayFrequency);
+
+  if (!primaryRefreshRate && process.platform === 'win32') {
+    primaryRefreshRate = await queryWindowsPrimaryRefreshRate();
+  }
+
+  displayRefreshCache = {
+    displays,
+    primaryRefreshRate,
+    // Objetivo real de refresco: la frecuencia del panel si es de alto
+    // refresco; si no, 60 fps (el estandar que el resto de monitores usa).
+    targetRefreshRate: primaryRefreshRate > 60 ? primaryRefreshRate : 60,
+  };
+
+  console.log(
+    `[Perf] Display principal: ${primaryRefreshRate || 'desconocida'} Hz` +
+    ` | objetivo: ${displayRefreshCache.targetRefreshRate} fps` +
+    ` | modo: ${highRefreshMode}`
+  );
+
+  return displayRefreshCache;
 }
 
 
@@ -648,26 +1199,70 @@ function createWindow() {
 
   attachExternalLinkHandlers(mainWindow);
 
+  // Registro diagnóstico y autorecuperación si el proceso renderer se cae o deja de responder
+  mainWindow.webContents.on('render-process-gone', (_e, details) => {
+    console.error('[Renderer] proceso caído:', details.reason, details.exitCode);
+    try {
+      fs.appendFileSync(
+        path.join(app.getPath('userData'), 'renderer-crash.log'),
+        `[${new Date().toISOString()}] ${details.reason} (${details.exitCode})\n`
+      );
+    } catch (_) {}
+    if (details.reason !== 'clean-exit' && mainWindow && !mainWindow.isDestroyed()) {
+      setTimeout(() => mainWindow.webContents.reload(), 500);
+    }
+  });
+
+  mainWindow.on('unresponsive', () => {
+    console.warn('[Renderer] sin respuesta');
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.reload();
+    }, 5000);
+  });
+
   // 👈 AÑADIR: mostrar la ventana solo cuando el renderer ya pintó su primer frame
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
   });
 
-  // Liberar memoria V8 y caché cuando la ventana se oculta (ej. al lanzar un juego) o minimiza
-  mainWindow.on('hide', () => {
+  // Función auxiliar para purgar memoria del renderer y del proceso principal
+  const purgeLauncherMemory = () => {
     try {
       if (typeof global.gc === 'function') global.gc();
     } catch (_) { }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        mainWindow.webContents.session.clearCache().catch(() => {});
+        mainWindow.webContents.executeJavaScript(`
+          if (typeof window.gc === 'function') {
+            try { window.gc(); } catch (_) {}
+          }
+        `).catch(() => {});
+      } catch (_) { }
+    }
+  };
+
+  // Liberar memoria V8 y caché cuando la ventana se oculta (ej. al lanzar un juego) o minimiza
+  mainWindow.on('hide', () => {
+    purgeLauncherMemory();
   });
 
   mainWindow.on('minimize', () => {
-    try {
-      if (typeof global.gc === 'function') global.gc();
-    } catch (_) { }
+    purgeLauncherMemory();
   });
 
   mainWindow.webContents.on('did-finish-load', () => {
     broadcastMediaSessions();
+  });
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (
+      (input.key === 'F12' && input.type === 'keyDown') ||
+      (input.control && input.shift && input.key.toLowerCase() === 'i' && input.type === 'keyDown')
+    ) {
+      mainWindow.webContents.toggleDevTools();
+      event.preventDefault();
+    }
   });
 
   // Determinar si estamos en modo desarrollo o producción
@@ -872,7 +1467,8 @@ function showWindowsTaskbar() {
 function showOverlay() {
   const win = createOverlayWindow();
   win.setIgnoreMouseEvents(false);
-  win.showInactive();
+  win.show();
+  win.moveTop();
   win.focus();
 
   if (process.platform === 'win32') {
@@ -910,7 +1506,6 @@ function isOverlayVisible() {
 
 function toggleOverlay() {
   if (!overlayEnabled) return;
-  if (!activeGameInfo) return; // no hay juego corriendo, no tiene sentido mostrarlo
   if (isOverlayVisible()) {
     hideOverlayWindow();
   } else {
@@ -980,27 +1575,28 @@ function startGamepadOverlayListener() {
   if (!overlayEnabled) return;
   if (linux) { stopLinuxGamepad = require('./linuxGamepad').start(overlayCombo, toggleOverlay); return; }
 
-  // 2. Monitoreo para mandos XInput (Xbox o controladores emulados) y
-  // PlayStation (DualShock 4 / DualSense vía Legacy Joystick API).
-  // El overlay se activará mediante el detector externo (xinput-watcher.exe)
-  // con la combinación configurada (Select + Start, L3 + R3, L1 + R1, etc.).
+  // Monitoreo universal de mandos: XInput (Xbox/DS4Windows/Steam Input) y
+  // Legacy Joystick API (mandos PlayStation/genéricos HID sin driver extra).
+  // xinput-watcher.exe acepta tanto combos predefinidos (SELECT_START, L3_R3,
+  // L1_R1, L2_R2_START) como combos personalizados en formato RAW:<b0>,<b1>,...
+  // donde los índices corresponden al orden estándar de la Gamepad API.
   if (process.platform === 'win32') {
     const xinputExe = resolveXinputWatcherPath();
 
     if (xinputExe) {
       try {
-        console.log('[GamepadListener] Iniciando xinput-watcher desde:', xinputExe);
+        console.log('[GamepadListener] Iniciando xinput-watcher desde:', xinputExe, '- combo:', overlayCombo);
         xinputWatcherChild = spawn(xinputExe, [overlayCombo], {
           windowsHide: true,
           stdio: ['ignore', 'pipe', 'pipe'],
         });
 
         xinputWatcherChild.stdout.on('data', (data) => {
-          if (data && (data.toString().includes('SELECT_START') || data.toString().includes('OVERLAY_TRIGGER'))) {
+          if (data && data.toString().includes('OVERLAY_TRIGGER')) {
             const now = Date.now();
             if (now - lastGamepadToggleTime > 600) {
               lastGamepadToggleTime = now;
-              console.log(`[GamepadListener] Combo ${overlayCombo} pulsado en mando`);
+              console.log('[GamepadListener] Combo pulsado en mando:', overlayCombo);
               toggleOverlay();
             }
           }
@@ -1120,12 +1716,55 @@ function isProcessRunningUnderDir(dirPath) {
   });
 }
 
+// Verifica si hay algún proceso activo cuya ruta contenga el PackageFamilyName
+// del juego UWP/MSIX. Esto es necesario porque los juegos de Xbox Game Pass
+// y Microsoft Store corren desde C:\Program Files\WindowsApps\<pkg> y no desde
+// C:\XboxGames\..., por lo que isProcessRunningUnderDir no los detecta.
+function isUwpProcessRunning(packageFamilyName) {
+  return new Promise((resolve) => {
+    if (!packageFamilyName || process.platform !== 'win32') return resolve(false);
+    const escaped = packageFamilyName.replace(/'/g, "''");
+    // Buscamos cualquier proceso cuya ruta de ejecutable contenga el PFN
+    const psCommand = `(Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -like '*${escaped}*' } | Select-Object -First 1 -ExpandProperty ProcessId)`;
+    exec(`powershell -NoProfile -Command "${psCommand}"`, { timeout: 8000 }, (error, stdout) => {
+      if (error) return resolve(false);
+      resolve(Boolean(stdout && stdout.trim().length > 0));
+    });
+  });
+}
+
 // Aplica el comportamiento configurado por el usuario cuando arranca un juego.
 // Centraliza lo que antes eran dos bloques duplicados (uno en launch-app,
 // otro en startSteamGameWatch) para que 'hide' | 'minimize' | 'background'
 // se resuelvan siempre igual sin importar el origen del lanzamiento.
 function suspendLauncherForGame(sourceLabel = 'Steam') {
   if (!mainWindow) return;
+
+  // 1. Congelar rendering de background y timers en Chromium mientras se juega
+  try {
+    mainWindow.webContents.setBackgroundThrottling(true);
+  } catch (_) { }
+
+  // 2. Notificar al renderer para pausar todos los <video> y audios activos
+  try {
+    mainWindow.webContents.send('launcher-suspended', true);
+  } catch (_) { }
+
+  // 3. Pausar timers y polling de fondo (MediaSessions, progreso de descargas)
+  pauseBackgroundTasksForGame();
+
+  // 4. Liberar memoria heap de Node / V8 y purgar cachés del renderer
+  try {
+    if (typeof global.gc === 'function') global.gc();
+  } catch (_) { }
+  try {
+    mainWindow.webContents.session.clearCache().catch(() => {});
+    mainWindow.webContents.executeJavaScript(`
+      if (typeof window.gc === 'function') {
+        try { window.gc(); } catch (_) {}
+      }
+    `).catch(() => {});
+  } catch (_) { }
 
   if (launcherPlayBehavior === 'minimize') {
     mainWindow.minimize();
@@ -1146,6 +1785,20 @@ function suspendLauncherForGame(sourceLabel = 'Steam') {
 // haber quedado detrás de la ventana del juego, así que solo la enfocamos.
 function refocusLauncherAfterGame(sourceLabel = 'Steam') {
   if (!mainWindow) return;
+
+  // 1. Restaurar throttling para render suave a 60fps
+  try {
+    mainWindow.webContents.setBackgroundThrottling(false);
+  } catch (_) { }
+
+  // 2. Notificar al renderer para reactivar videos y UI
+  try {
+    mainWindow.webContents.send('launcher-suspended', false);
+  } catch (_) { }
+
+  // 3. Reanudar timers de fondo
+  resumeBackgroundTasksAfterGame();
+
   if (mainWindow.isMinimized() || !mainWindow.isVisible()) {
     setTimeout(() => {
       if (mainWindow) {
@@ -1166,11 +1819,365 @@ function stopSteamGameWatch(id) {
   }
 }
 
-function startSteamGameWatch(id, appId, installDir, sourceLabel = 'Steam', gameMeta = {}) {
+// ─────────────────────────────────────────────────────────────────────────────
+// ── Trophy notification system ───────────────────────────────────────────────
+// Muestra una ventana flotante estilo PS5 con el logro desbloqueado, sonido
+// incluido. Las notificaciones se encolan para no superponerse.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Convierte la rareza del logro en colores y texto PS5-style. */
+function trophyRarityStyle(rarity) {
+  switch (rarity) {
+    case 'platinum': return { color: '#B0C4DE', label: 'Platinum', glow: 'rgba(176,196,222,0.55)', icon: '🏆' };
+    case 'gold':     return { color: '#FFD700', label: 'Gold',     glow: 'rgba(255,215,0,0.55)',   icon: '🥇' };
+    case 'silver':   return { color: '#C0C0C0', label: 'Silver',   glow: 'rgba(192,192,192,0.45)', icon: '🥈' };
+    default:         return { color: '#CD7F32', label: 'Bronze',   glow: 'rgba(205,127,50,0.45)',  icon: '🥉' };
+  }
+}
+
+/**
+ * Muestra la siguiente notificación de la cola.
+ * Se llama recursivamente cuando la ventana se cierra.
+ */
+function processTrophyQueue() {
+  if (trophyNotifBusy || trophyNotifQueue.length === 0) return;
+  trophyNotifBusy = true;
+
+  const { achievement, gameInfo } = trophyNotifQueue.shift();
+
+  try {
+    // Cerrar ventana previa si quedó colgada
+    if (trophyNotifWindow && !trophyNotifWindow.isDestroyed()) {
+      trophyNotifWindow.close();
+    }
+  } catch (_) { }
+
+  const display = screen.getPrimaryDisplay();
+  const { width: sw } = display.workAreaSize;
+  const W = 440, H = 100;
+  const margin = 24;
+
+  try {
+    trophyNotifWindow = new BrowserWindow({
+      width: W,
+      height: H,
+      x: Math.round(display.workArea.x + sw - W - margin),
+      y: Math.round(display.workArea.y + margin),
+      frame: false,
+      transparent: true,
+      backgroundColor: '#00000000',
+      alwaysOnTop: true,
+      focusable: false,
+      skipTaskbar: true,
+      resizable: false,
+      movable: false,
+      hasShadow: false,
+      show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true },
+    });
+
+    trophyNotifWindow.setAlwaysOnTop(true, 'screen-saver');
+    trophyNotifWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+    const rs = trophyRarityStyle(achievement.rarity || 'bronze');
+
+    // Iconos de rareza SVG inline para evitar dependencias externas
+    const trophyIconHtml = {
+      platinum: `<svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 2L9.5 8.5H3l5.5 4L6.5 19 12 15l5.5 4-2-6.5L21 8.5h-6.5L12 2z" fill="#B0C4DE" stroke="#7fa8c9" stroke-width="0.5"/></svg>`,
+      gold:     `<svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 2L9.5 8.5H3l5.5 4L6.5 19 12 15l5.5 4-2-6.5L21 8.5h-6.5L12 2z" fill="#FFD700" stroke="#c8a400" stroke-width="0.5"/></svg>`,
+      silver:   `<svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 2L9.5 8.5H3l5.5 4L6.5 19 12 15l5.5 4-2-6.5L21 8.5h-6.5L12 2z" fill="#C0C0C0" stroke="#909090" stroke-width="0.5"/></svg>`,
+      bronze:   `<svg width="26" height="26" viewBox="0 0 24 24" fill="none"><path d="M12 2L9.5 8.5H3l5.5 4L6.5 19 12 15l5.5 4-2-6.5L21 8.5h-6.5L12 2z" fill="#CD7F32" stroke="#9a5c1e" stroke-width="0.5"/></svg>`,
+    }[achievement.rarity || 'bronze'] || trophyIconHtml.bronze;
+
+    // Imagen del juego: si es una ruta local la convertimos a base64 para el HTML inline.
+    let gameImgHtml = '';
+    const gameImg = gameInfo?.image;
+    if (gameImg) {
+      try {
+        let imgSrc = gameImg;
+        // Rutas locales de archivo
+        if (!imgSrc.startsWith('http') && !imgSrc.startsWith('data:') && fs.existsSync(imgSrc)) {
+          const ext = path.extname(imgSrc).substring(1).toLowerCase() || 'png';
+          const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+          imgSrc = `data:${mime};base64,${fs.readFileSync(imgSrc).toString('base64')}`;
+        }
+        gameImgHtml = `<img src="${imgSrc}" style="width:56px;height:56px;object-fit:cover;border-radius:8px;flex-shrink:0;" onerror="this.style.display='none'"/>`;
+      } catch (_) { /* noop */ }
+    }
+
+    // Icono del logro (URL https de Steam o base64)
+    let achImgHtml = '';
+    if (achievement.icon) {
+      achImgHtml = `<img src="${achievement.icon}" style="width:40px;height:40px;border-radius:6px;flex-shrink:0;" onerror="this.style.display='none'"/>`;
+    }
+
+    const html = `<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;background:transparent;overflow:hidden;
+    font-family:"Segoe UI",system-ui,-apple-system,sans-serif;}
+  .card{
+    display:flex;align-items:center;gap:10px;
+    width:100%;height:100%;
+    padding:10px 14px;
+    background:linear-gradient(135deg,rgba(14,14,18,0.97) 0%,rgba(22,22,30,0.97) 100%);
+    border:1px solid rgba(255,255,255,0.10);
+    border-left:3px solid ${rs.color};
+    border-radius:12px;
+    box-shadow:0 0 24px ${rs.glow}, 0 8px 32px rgba(0,0,0,0.7);
+    animation:slideIn 0.38s cubic-bezier(0.22,1,0.36,1) both;
+  }
+  .card.exit{animation:slideOut 0.32s ease-in both;}
+  @keyframes slideIn{from{opacity:0;transform:translateX(60px);}to{opacity:1;transform:translateX(0);}}
+  @keyframes slideOut{from{opacity:1;transform:translateX(0);}to{opacity:0;transform:translateX(60px);}}
+  .game-img{width:56px;height:56px;object-fit:cover;border-radius:8px;flex-shrink:0;}
+  .divider{width:1px;height:52px;background:rgba(255,255,255,0.12);flex-shrink:0;}
+  .info{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px;}
+  .unlocked-label{font-size:10px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;
+    color:rgba(255,255,255,0.45);}
+  .ach-row{display:flex;align-items:center;gap:7px;}
+  .ach-name{font-size:13px;font-weight:700;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .ach-desc{font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .rarity-badge{display:flex;align-items:center;gap:4px;flex-shrink:0;}
+  .rarity-label{font-size:10px;font-weight:700;letter-spacing:0.8px;color:${rs.color};}
+</style></head>
+<body>
+<div class="card" id="card">
+  ${gameImgHtml}
+  <div class="divider"></div>
+  <div class="info">
+    <span class="unlocked-label">Trofeo desbloqueado</span>
+    <div class="ach-row">
+      ${achImgHtml}
+      <span class="ach-name">${(achievement.name || 'Logro').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
+    </div>
+    <span class="ach-desc">${(achievement.description || '').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</span>
+  </div>
+  <div class="rarity-badge">
+    ${trophyIconHtml}
+    <span class="rarity-label">${rs.label}</span>
+  </div>
+</div>
+<script>
+  const DISPLAY_MS = 5500;
+  const EXIT_MS = 320;
+  setTimeout(() => {
+    const card = document.getElementById('card');
+    if (card) card.classList.add('exit');
+  }, DISPLAY_MS - EXIT_MS);
+</script>
+</body></html>`;
+
+    let shown = false;
+    const showWindow = () => {
+      if (shown) return;
+      shown = true;
+      if (trophyNotifWindow && !trophyNotifWindow.isDestroyed()) {
+        trophyNotifWindow.showInactive();
+      }
+    };
+
+    trophyNotifWindow.once('ready-to-show', showWindow);
+    trophyNotifWindow.webContents.once('did-finish-load', showWindow);
+
+    trophyNotifWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+
+    // Safety fallback: si por alguna razón data: URL ya terminó antes de registrar los eventos
+    setTimeout(showWindow, 120);
+
+    // Notificar al renderer principal para que reproduzca el sonido y guarde en historial
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('trophy-unlocked', {
+        achievement,
+        gameInfo,
+      });
+    }
+
+    const closeAfterMs = 5600;
+    const closeTimer = setTimeout(() => {
+      try {
+        if (trophyNotifWindow && !trophyNotifWindow.isDestroyed()) {
+          trophyNotifWindow.close();
+        }
+      } catch (_) { }
+      trophyNotifWindow = null;
+      trophyNotifBusy = false;
+      // Procesar la siguiente notificación de la cola
+      processTrophyQueue();
+    }, closeAfterMs);
+
+    trophyNotifWindow.on('closed', () => {
+      trophyNotifWindow = null;
+      clearTimeout(closeTimer);
+      trophyNotifBusy = false;
+      processTrophyQueue();
+    });
+  } catch (err) {
+    console.error('[Trophy] Error mostrando notificación de logro:', err);
+    trophyNotifWindow = null;
+    trophyNotifBusy = false;
+    processTrophyQueue();
+  }
+}
+
+/**
+ * Encola una notificación de trofeo. Thread-safe: no se superponen ventanas.
+ */
+function enqueueTrophyNotification(achievement, gameInfo) {
+  trophyNotifQueue.push({ achievement, gameInfo });
+  processTrophyQueue();
+}
+
+// ── Poller de logros en tiempo real ──────────────────────────────────────────
+
+/**
+ * Inicia un poll periódico de logros Steam para el juego activo.
+ * Cuando detecta nuevos logros muestra una notificación por cada uno.
+ */
+function startTrophyPoller(id, appId, apiKey, steamId, gameInfo) {
+  stopTrophyPoller(id); // limpiar si ya había uno
+
+  // Primer fetch para obtener el baseline de logros ya desbloqueados
+  let knownUnlockedSet = null; // Set<string> de apiName ya desbloqueados al arrancar
+
+  const POLL_MS = 60 * 1000; // 60s — respetuoso con el rate limit de Steam
+
+  const fetchUnlocked = () => new Promise((resolve) => {
+    const url = `https://api.steampowered.com/ISteamUserStats/GetPlayerAchievements/v0001/?appid=${appId}&key=${apiKey}&steamid=${steamId}`;
+    const https = require('https');
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          const list = json?.playerstats?.achievements;
+          if (!Array.isArray(list)) return resolve(null);
+          resolve(list);
+        } catch { resolve(null); }
+      });
+    }).on('error', () => resolve(null));
+  });
+
+  // Fetch inicial: establece el baseline sin mostrar notificaciones
+  fetchUnlocked().then((list) => {
+    if (!list) return;
+    knownUnlockedSet = new Set(list.filter(a => a.achieved === 1).map(a => a.apiname));
+  });
+
+  const schemaCache = { data: null };
+  const fetchSchema = () => new Promise((resolve) => {
+    if (schemaCache.data) return resolve(schemaCache.data);
+    const https = require('https');
+    const url = `https://api.steampowered.com/ISteamUserStats/GetSchemaForGame/v2/?appid=${appId}&key=${apiKey}&l=spanish`;
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          const achs = json?.game?.availableGameStats?.achievements ?? [];
+          schemaCache.data = achs;
+          resolve(achs);
+        } catch { resolve([]); }
+      });
+    }).on('error', () => resolve([]));
+  });
+
+  const percentCache = { data: null };
+  const fetchPercents = () => new Promise((resolve) => {
+    if (percentCache.data) return resolve(percentCache.data);
+    const https = require('https');
+    const url = `https://api.steampowered.com/ISteamUserStats/GetGlobalAchievementPercentagesForApp/v0002/?gameid=${appId}`;
+    https.get(url, (res) => {
+      let data = '';
+      res.on('data', chunk => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          const list = json?.achievementpercentages?.achievements ?? [];
+          const map = {};
+          for (const a of list) map[a.name] = Number(a.percent);
+          percentCache.data = map;
+          resolve(map);
+        } catch { resolve({}); }
+      });
+    }).on('error', () => resolve({}));
+  });
+
+  const rarityForPct = (pct) => {
+    if (pct === null || pct === undefined) return 'bronze';
+    if (pct <= 1)  return 'platinum';
+    if (pct <= 5)  return 'gold';
+    if (pct <= 15) return 'silver';
+    return 'bronze';
+  };
+
+  const pollInterval = setInterval(async () => {
+    if (knownUnlockedSet === null) return; // baseline aún no establecido
+    const list = await fetchUnlocked();
+    if (!list) return;
+
+    const nowUnlocked = new Set(list.filter(a => a.achieved === 1).map(a => a.apiname));
+    const newOnes = [...nowUnlocked].filter(apiname => !knownUnlockedSet.has(apiname));
+
+    if (newOnes.length === 0) {
+      knownUnlockedSet = nowUnlocked;
+      return;
+    }
+
+    // Hay logros nuevos: obtener schema y porcentajes para enriquecer la notificación
+    const [schema, percents] = await Promise.all([fetchSchema(), fetchPercents()]);
+    const schemaMap = {};
+    for (const s of schema) schemaMap[s.name] = s;
+
+    for (const apiname of newOnes) {
+      const s = schemaMap[apiname] || {};
+      const pct = percents[apiname] ?? null;
+      const achievement = {
+        apiName: apiname,
+        name: s.displayName || apiname,
+        description: s.description || '',
+        icon: s.icon || '',
+        rarity: rarityForPct(pct),
+        globalPercentage: pct,
+        achieved: true,
+      };
+      enqueueTrophyNotification(achievement, gameInfo);
+    }
+
+    knownUnlockedSet = nowUnlocked;
+  }, POLL_MS);
+
+  trophyPollerMap.set(id, pollInterval);
+}
+
+function stopTrophyPoller(id) {
+  const t = trophyPollerMap.get(id);
+  if (t) {
+    clearInterval(t);
+    trophyPollerMap.delete(id);
+  }
+}
+
+function stopAllTrophyPollers() {
+  for (const [id] of trophyPollerMap) stopTrophyPoller(id);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+function startSteamGameWatch(id, appId, installDir, sourceLabel = 'Steam', gameMeta = {}, extraOpts = {}) {
   stopSteamGameWatch(id); // por si ya había un watcher previo para este id
 
+  // Para juegos UWP/Xbox también vigilamos el PackageFamilyName del proceso
+  // (los juegos de Game Pass corren desde WindowsApps, no desde XboxGames)
+  const packageFamilyName = extraOpts.packageFamilyName || null;
+
   const POLL_MS = 4000;
-  const MAX_WAIT_FOR_START_MS = 90 * 1000; // margen para que Steam/Epic abra el juego
+  // Los juegos UWP/Xbox (Game Pass, Microsoft Store) pueden tardar varios minutos
+  // en arrancar su proceso. Usamos un margen mayor para no restaurar el launcher
+  // prematuramente mientras Minecraft (u otro juego UWP) todavia esta cargando.
+  const MAX_WAIT_FOR_START_MS = (sourceLabel === 'Xbox' || packageFamilyName) ? 5 * 60 * 1000 : 90 * 1000;
   // ── Debounce de "juego cerrado" ──
   // isProcessRunningUnderDir() detecta CUALQUIER proceso cuyo ejecutable
   // viva dentro de la carpeta del juego, no solo el .exe principal. Muchos
@@ -1208,6 +2215,22 @@ function startSteamGameWatch(id, appId, installDir, sourceLabel = 'Steam', gameM
   enableOverlayHotkey();
   startGamepadOverlayListener();
 
+  // ── Poller de logros en tiempo real ──
+  // Solo para juegos Steam con appId numérico válido. Las credenciales
+  // (steamId / apiKey) se pasan desde el renderer al lanzar el juego
+  // y se guardan en activeGameInfo para uso del poller.
+  (() => {
+    const numericAppId = typeof appId === 'string' ? parseInt(appId, 10) : appId;
+    if (!Number.isFinite(numericAppId) || numericAppId <= 0) return;
+    const creds = extraOpts.steamCreds || activeSteamCreds;
+    if (!creds || !creds.steamId || !creds.apiKey) return;
+    startTrophyPoller(id, numericAppId, creds.apiKey, creds.steamId, {
+      id,
+      title: gameMeta.title || sourceLabel,
+      image: gameMeta.image || null,
+    });
+  })();
+
   // Ya no tapamos la pantalla con el launcher mientras Steam/Epic arranca:
   // aplicamos directamente el comportamiento configurado por el usuario
   // (ocultar/minimizar/segundo plano) apenas se pide lanzar el juego.
@@ -1217,12 +2240,20 @@ function startSteamGameWatch(id, appId, installDir, sourceLabel = 'Steam', gameM
     if (gameExited) return;
     gameExited = true;
     stopSteamGameWatch(id);
+    stopTrophyPoller(id); // detener polling de logros
     hideTrayIcon();
 
-    // ── NUEVO ──
-    disableOverlayHotkey();
-    stopGamepadOverlayListener();
+    // ── Limpieza de overlay tras salir del juego ──
+    hideOverlayWindow();
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      try { overlayWindow.destroy(); } catch (_) {}
+      overlayWindow = null;
+    }
     activeGameInfo = null;
+    if (!overlayEnabled) {
+      disableOverlayHotkey();
+      stopGamepadOverlayListener();
+    }
 
     if (mainWindow) {
       mainWindow.setAlwaysOnTop(false);
@@ -1233,7 +2264,18 @@ function startSteamGameWatch(id, appId, installDir, sourceLabel = 'Steam', gameM
 
   const timer = setInterval(async () => {
     try {
-      const running = await isProcessRunningUnderDir(installDir);
+      // Para Xbox/UWP comprobamos tanto la carpeta de instalación como el PFN del proceso
+      let running = await isProcessRunningUnderDir(installDir);
+      if (!running && packageFamilyName) {
+        running = await isUwpProcessRunning(packageFamilyName);
+      }
+      // Tercer metodo de deteccion: buscar por el PackageFamilyName extraido del appId
+      // Cubre el caso en que installDir esta vacio y packageFamilyName tambien es null
+      // (juego añadido desde Servicios de Juegos de Microsoft sin AUMID completo).
+      if (!running && !packageFamilyName && appId && typeof appId === 'string' && appId.includes('!')) {
+        const derivedPfn = appId.split('!')[0];
+        if (derivedPfn) running = await isUwpProcessRunning(derivedPfn);
+      }
       if (running) {
         consecutiveMisses = 0;
         if (!seenRunning) {
@@ -1254,7 +2296,12 @@ function startSteamGameWatch(id, appId, installDir, sourceLabel = 'Steam', gameM
         consecutiveMisses++;
         const runningForMs = firstSeenRunningAt ? Date.now() - firstSeenRunningAt : 0;
         const withinStartupGrace = runningForMs < MIN_RUNNING_MS_BEFORE_EXIT;
-        const missesNeeded = withinStartupGrace ? MISSES_TO_CONFIRM_EXIT : 1;
+        // Para juegos UWP/Xbox el proceso puede desaparecer momentaneamente
+        // (actualizaciones internas, cambio de proceso de Minecraft, etc.), por
+        // lo que requerimos 3 polls consecutivos sin proceso antes de confirmar
+        // el cierre, incluso fuera de la ventana de arranque.
+        const isUwpWatch = !!(packageFamilyName || (sourceLabel === 'Xbox'));
+        const missesNeeded = withinStartupGrace ? MISSES_TO_CONFIRM_EXIT : (isUwpWatch ? 3 : 1);
         if (consecutiveMisses >= missesNeeded) {
           console.log(`[${sourceLabel}] Proceso del juego finalizado, restaurando launcher (` + appId + ')');
           finish();
@@ -1692,6 +2739,280 @@ function getEpicInstalledGames() {
 
   console.log('[Epic] Juegos instalados encontrados:', games.length);
   return games;
+}
+
+// ── Detección de juegos de Xbox Game Pass y Microsoft Store ──
+let xboxGamesCache = [];
+
+function getXboxInstalledGames() {
+  if (process.platform !== 'win32') return [];
+
+  const games = [];
+  const seenIds = new Set();
+  const seenPaths = new Set();
+
+  // 1. Escanear carpetas de instalación de Xbox (<Unidad>:\XboxGames en todas las unidades del sistema)
+  const drives = 'CDEFGHIJKLMNOPQRSTUVWXYZ'.split('');
+  for (const d of drives) {
+    const xboxDir = `${d}:\\XboxGames`;
+    if (!fs.existsSync(xboxDir)) continue;
+    try {
+      const folders = fs.readdirSync(xboxDir, { withFileTypes: true });
+      for (const f of folders) {
+        if (!f.isDirectory()) continue;
+        const gameFolder = path.join(xboxDir, f.name);
+        let configPath = path.join(gameFolder, 'Content', 'MicrosoftGame.Config');
+        let contentDir = path.join(gameFolder, 'Content');
+        if (!fs.existsSync(configPath)) {
+          configPath = path.join(gameFolder, 'MicrosoftGame.Config');
+          contentDir = gameFolder;
+        }
+
+        if (fs.existsSync(configPath)) {
+          try {
+            const xml = fs.readFileSync(configPath, 'utf8');
+            const titleMatch = xml.match(/DefaultDisplayName="([^"]+)"/i);
+            const exeMatch = xml.match(/<Executable[^>]+Name="([^"]+)"/i);
+            const logoMatch = xml.match(/(?:Square150x150Logo|StoreLogo|Square44x44Logo)="([^"]+)"/i);
+            const identityMatch = xml.match(/<Identity[^>]+Name="([^"]+)"/i);
+
+            const title = titleMatch ? titleMatch[1] : f.name;
+            const exeName = exeMatch ? exeMatch[1] : '';
+            const helperPath = path.join(contentDir, 'gamelaunchhelper.exe');
+            const exePath = exeName ? path.join(contentDir, exeName) : '';
+            const launchPath = fs.existsSync(helperPath) ? helperPath : (fs.existsSync(exePath) ? exePath : gameFolder);
+
+            let logoPath = null;
+            if (logoMatch && logoMatch[1]) {
+              const candidate = path.join(contentDir, logoMatch[1]);
+              if (fs.existsSync(candidate)) logoPath = candidate;
+            }
+            if (!logoPath) {
+              for (const name of ['Logo.png', 'StoreLogo.png', 'Square150x150Logo.png', 'LargeLogo.png', 'SmallLogo.png']) {
+                const candidate = path.join(contentDir, name);
+                if (fs.existsSync(candidate)) {
+                  logoPath = candidate;
+                  break;
+                }
+              }
+            }
+
+            let icon = null;
+            if (logoPath && fs.existsSync(logoPath)) {
+              try {
+                const ext = path.extname(logoPath).toLowerCase();
+                const mime = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+                const b64 = fs.readFileSync(logoPath).toString('base64');
+                icon = `data:${mime};base64,${b64}`;
+              } catch (_) {}
+            }
+
+            const pkgName = identityMatch ? identityMatch[1] : f.name;
+            const id = 'xbox_' + pkgName.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+            if (!seenIds.has(id)) {
+              seenIds.add(id);
+              if (launchPath) seenPaths.add(launchPath.toLowerCase());
+              games.push({
+                id,
+                title,
+                installLocation: gameFolder,
+                contentDir,
+                launchPath,
+                logoPath,
+                icon,
+                packageName: pkgName,
+                source: 'xbox',
+              });
+            }
+          } catch (e) {
+            console.error('[Xbox] Error leyendo config de', f.name, e.message);
+          }
+        }
+      }
+    } catch (e) {
+      console.error('[Xbox] Error escaneando', xboxDir, e.message);
+    }
+  }
+
+  // 2. Escanear paquetes AppX registrados (juegos de Microsoft Store / Xbox Game Pass)
+  try {
+    const psScript = `
+$games = @()
+$startApps = @{}
+try {
+    Get-StartApps | Where-Object { $_.AppID -like '*!*' } | ForEach-Object {
+        $startApps[$_.AppID] = $_.Name
+    }
+} catch {}
+
+Get-AppxPackage | Where-Object { -not $_.IsFramework -and -not $_.IsResourcePackage -and $_.InstallLocation -and (Test-Path $_.InstallLocation) } | ForEach-Object {
+    $pkg = $_
+    $loc = $pkg.InstallLocation
+    $manifestPath = Join-Path $loc 'AppxManifest.xml'
+    $cfgPath = Join-Path $loc 'MicrosoftGame.Config'
+    if (-not (Test-Path $cfgPath)) {
+        $cfgPath = Join-Path $loc 'Content\\MicrosoftGame.Config'
+    }
+    
+    $isGame = $false
+    $title = ''
+    $appId = ''
+    $logoFile = ''
+    
+    if (Test-Path $cfgPath) {
+        $isGame = $true
+        try {
+            [xml]$cfgXml = Get-Content $cfgPath -Raw -ErrorAction SilentlyContinue
+            $title = $cfgXml.Game.ShellVisuals.DefaultDisplayName
+            $logoFile = $cfgXml.Game.ShellVisuals.Square150x150Logo
+            if (-not $logoFile) { $logoFile = $cfgXml.Game.ShellVisuals.StoreLogo }
+        } catch {}
+    }
+    
+    if (Test-Path $manifestPath) {
+        $raw = Get-Content $manifestPath -Raw -ErrorAction SilentlyContinue
+        if ($raw -match 'windows\\.game' -or $raw -match 'ms-xbl-' -or $raw -match 'Microsoft\\.DirectXRuntime' -or $raw -match 'Category="windows\\.game"') {
+            $isGame = $true
+        }
+        if ($raw -match '<Application\\s+[^>]*Id="([^"]+)"') {
+            $appId = $matches[1]
+        }
+        if (-not $title -and $raw -match '<DisplayName>([^<]+)</DisplayName>') {
+            $disp = $matches[1]
+            if (-not ($disp -like 'ms-resource:*')) {
+                $title = $disp
+            }
+        }
+    }
+    
+    if ($pkg.Name -like 'Microsoft.XboxGamingOverlay' -or $pkg.Name -like 'Microsoft.GamingServices' -or $pkg.Name -like 'Microsoft.XboxSpeechToTextOverlay') {
+        $isGame = $false
+    }
+    
+    if ($isGame) {
+        $aumid = ''
+        if ($appId) {
+            $aumid = $pkg.PackageFamilyName + '!' + $appId
+        }
+        if (-not $title -and $aumid -and $startApps[$aumid]) {
+            $title = $startApps[$aumid]
+        }
+        if (-not $title) {
+            foreach ($k in $startApps.Keys) {
+                if ($k.StartsWith($pkg.PackageFamilyName)) {
+                    $title = $startApps[$k]
+                    if (-not $aumid) { $aumid = $k }
+                    break
+                }
+            }
+        }
+        if (-not $title) {
+            $title = $pkg.Name
+        }
+
+        $games += [PSCustomObject]@{
+            PackageName = $pkg.Name
+            PackageFamilyName = $pkg.PackageFamilyName
+            InstallLocation = $loc
+            Title = $title
+            AppId = $appId
+            AUMID = $aumid
+            Logo = $logoFile
+        }
+    }
+}
+$games | ConvertTo-Json -Compress
+`;
+
+    const b64 = Buffer.from(psScript, 'utf16le').toString('base64');
+    const raw = execSync(`powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${b64}`, {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 15000,
+    });
+
+    if (raw && raw.trim()) {
+      const parsed = JSON.parse(raw.trim());
+      const appxList = Array.isArray(parsed) ? parsed : [parsed];
+      for (const item of appxList) {
+        const pkgName = item.PackageName || item.PackageFamilyName;
+        const id = 'xbox_' + pkgName.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const aumid = item.AUMID || (item.AppId ? `${item.PackageFamilyName}!${item.AppId}` : '');
+        const launchPath = aumid ? `shell:AppsFolder\\${aumid}` : '';
+
+        // Si ya fue detectado por la carpeta XboxGames, enriquecerlo con el AUMID oficial
+        const existingIdx = games.findIndex(g =>
+          g.id === id ||
+          (g.packageName && item.PackageName && g.packageName.toLowerCase() === item.PackageName.toLowerCase()) ||
+          (g.title && item.Title && g.title.toLowerCase() === item.Title.toLowerCase())
+        );
+
+        if (existingIdx !== -1) {
+          if (aumid) games[existingIdx].aumid = aumid;
+          if (!games[existingIdx].installLocation && item.InstallLocation) {
+            games[existingIdx].installLocation = item.InstallLocation;
+          }
+        } else if (!seenIds.has(id)) {
+          seenIds.add(id);
+          let logoPath = null;
+          let icon = null;
+          if (item.Logo && item.InstallLocation) {
+            const cand = path.join(item.InstallLocation, item.Logo);
+            if (fs.existsSync(cand)) {
+              logoPath = cand;
+              try {
+                const ext = path.extname(cand).toLowerCase();
+                const mime = ext === '.png' ? 'image/png' : ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+                const b64 = fs.readFileSync(cand).toString('base64');
+                icon = `data:${mime};base64,${b64}`;
+              } catch (_) {}
+            }
+          }
+          games.push({
+            id,
+            title: item.Title || pkgName,
+            installLocation: item.InstallLocation,
+            contentDir: item.InstallLocation,
+            launchPath,
+            aumid,
+            logoPath,
+            icon,
+            packageName: pkgName,
+            source: 'xbox',
+          });
+        }
+      }
+    }
+  } catch (e) {
+    console.error('[Xbox] Error escaneando AppX games:', e.message);
+  }
+
+  xboxGamesCache = games;
+  console.log('[Xbox] Juegos instalados encontrados:', games.length);
+  return games;
+}
+
+function findXboxGameInstallDir(appIdOrAumidOrPath) {
+  if (!appIdOrAumidOrPath) return null;
+  const lower = appIdOrAumidOrPath.toLowerCase();
+
+  for (const g of xboxGamesCache) {
+    if (g.aumid && g.aumid.toLowerCase() === lower) return g.installLocation || g.contentDir;
+    if (g.id && g.id.toLowerCase() === lower) return g.installLocation || g.contentDir;
+    if (g.packageName && g.packageName.toLowerCase() === lower) return g.installLocation || g.contentDir;
+    if (g.launchPath && g.launchPath.toLowerCase() === lower) return g.installLocation || g.contentDir;
+  }
+
+  if (lower.includes('xboxgames')) {
+    const parts = path.normalize(appIdOrAumidOrPath).split(path.sep);
+    const xboxIdx = parts.findIndex(p => p.toLowerCase() === 'xboxgames');
+    if (xboxIdx !== -1 && xboxIdx + 1 < parts.length) {
+      return parts.slice(0, xboxIdx + 2).join(path.sep);
+    }
+  }
+
+  return null;
 }
 
 // ── Vigilancia de juegos de Epic lanzados por protocolo ──
@@ -2149,8 +3470,6 @@ function getSteamDownloadProgress() {
   return downloads;
 }
 
-let downloadParseInterval = null;
-
 // Cuando el sistema (o una herramienta externa como Omniconsola) intenta
 // abrir una segunda instancia del launcher, Electron dispara este evento en
 // la instancia YA existente en vez de dejar que la nueva instancia arranque
@@ -2166,9 +3485,18 @@ app.whenReady().then(async () => {
   if (linux) await linux.init();
   ipcMain.handle('get-rpcs3-data-dir', (_event, configured) => linux ? linux.rpcs3DataDir(configured) : path.dirname(configured || ''));
   initDB();
+  loadMetadataCache();
   startStoreBackend();
   startMediaSessionsBridge();
   setupDownloadWatchers();
+
+  // Pre-calentar el Cloudflare Worker silenciosamente para eliminar la latencia de cold start
+  fetch(`${WORKER_API_BASE}/`).catch(() => {});
+
+  // Iniciar descarga offline de arte en segundo plano para juegos existentes (con retraso para no saturar al inicio)
+  setTimeout(() => {
+    migrateExistingGamesMedia();
+  }, 15000);
 
   // Servidor http local para el build de producción (ver comentario junto
   // a createLocalStaticServer más arriba). En dev no hace falta: se usa
@@ -2284,17 +3612,62 @@ app.whenReady().then(async () => {
     }
   });
 
+  // ── IPC: Informacion de displays y frecuencia de refresco ───────────────
+  // El renderer la usa en Ajustes -> GPU & Performance para mostrar a que
+  // frecuencia refresca el monitor y cuantas animaciones por segundo puede
+  // alcanzar el launcher.
+  ipcMain.handle('get-display-info', async () => {
+    try {
+      const info = await getDisplayRefreshInfo();
+      return {
+        success: true,
+        ...info,
+        highRefreshMode,
+        highRefreshApplied: highRefreshMode === 'on',
+      };
+    } catch (err) {
+      console.warn('[Perf] Error obteniendo info de displays:', err.message);
+      return {
+        success: false,
+        error: err.message,
+        displays: [],
+        primaryRefreshRate: 0,
+        targetRefreshRate: 60,
+        highRefreshMode,
+        highRefreshApplied: highRefreshMode === 'on',
+      };
+    }
+  });
+
+  // ── IPC: Preferencia de alto refresco ───────────────────────────────────
+  // Cambia el switch 'disable-frame-rate-limit', que solo se puede aplicar
+  // al arrancar el proceso: el cambio se guarda y surte efecto al reiniciar
+  // el launcher.
+  ipcMain.handle('set-high-refresh-mode', async (_event, mode) => {
+    const next = mode === 'on' || mode === 'off' ? mode : 'auto';
+    try {
+      fs.writeFileSync(
+        PERF_SETTINGS_PATH,
+        JSON.stringify({ highRefreshMode: next }, null, 2)
+      );
+      highRefreshMode = next;
+      console.log('[Perf] Modo de alto refresco actualizado a:', next, '(requiere reinicio)');
+      return { success: true, highRefreshMode: next, requiresRestart: true };
+    } catch (err) {
+      console.warn('[Perf] No se pudo guardar la preferencia:', err.message);
+      return { success: false, error: err.message, highRefreshMode };
+    }
+  });
+
   // IPC: Datos de juego desde RAWG (vía Worker)
   ipcMain.handle('fetch-rawg-game-data', async (_event, title) => {
     if (!title || typeof title !== 'string') {
       return { success: false, error: 'Título no proporcionado' };
     }
     try {
-      const res = await fetch(`${WORKER_API_BASE}/api/rawg?title=${encodeURIComponent(title.trim())}`);
-      if (!res.ok) return { success: false, error: `Worker respondió ${res.status}` };
-      const json = await res.json();
-      if (!json.success || !json.game) {
-        return { success: false, error: json.error || 'Juego no encontrado en RAWG' };
+      const json = await fetchRawgFullData(title);
+      if (!json || !json.game) {
+        return { success: false, error: json?.error || 'Juego no encontrado en RAWG' };
       }
       return { success: true, data: json.game };
     } catch (error) {
@@ -2303,17 +3676,14 @@ app.whenReady().then(async () => {
     }
   });
 
-
   // IPC: Capturas de pantalla desde RAWG (vía Worker)
   ipcMain.handle('fetch-rawg-screenshots', async (_event, title) => {
     if (!title || typeof title !== 'string') {
       return { success: false, error: 'Título no proporcionado' };
     }
     try {
-      const res = await fetch(`${WORKER_API_BASE}/api/rawg?title=${encodeURIComponent(title.trim())}`);
-      if (!res.ok) return { success: false, error: `Worker respondió ${res.status}` };
-      const json = await res.json();
-      return { success: true, data: json.screenshots || [] };
+      const json = await fetchRawgFullData(title);
+      return { success: true, data: json?.screenshots || [] };
     } catch (error) {
       console.error('[RAWG Screenshots] Error:', error);
       return { success: false, error: error?.message || 'Error al consultar capturas de RAWG' };
@@ -2326,53 +3696,21 @@ app.whenReady().then(async () => {
       return { success: false, error: 'Título no proporcionado' };
     }
     try {
-      const res = await fetch(`${WORKER_API_BASE}/api/rawg?title=${encodeURIComponent(title.trim())}`);
-      if (!res.ok) return { success: false, error: `Worker respondió ${res.status}` };
-      const json = await res.json();
-      return { success: true, data: json.movies || [] };
+      const json = await fetchRawgFullData(title);
+      return { success: true, data: json?.movies || [] };
     } catch (error) {
       console.error('[RAWG Videos] Error:', error);
       return { success: false, error: error?.message || 'Error al consultar videos de RAWG' };
     }
   });
 
-
-  // Elige el mejor candidato de IGDB para un título: coincidencia exacta
-  // (normalizada) primero, luego prefijo en cualquier dirección y por último
-  // el primer resultado. Evita que un homónimo (ej. un DLC "Puppet Master"
-  // para el "Puppeteer" de PS3) oculte al juego real.
-  const normalizeIgdbTitle = (value) => String(value || '')
-    .toLowerCase()
-    .replace(/[®™©]/g, '')
-    .replace(/&/g, 'and')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  const pickBestIgdbMatch = (games, title) => {
-    if (!Array.isArray(games) || games.length === 0) return null;
-    const wanted = normalizeIgdbTitle(title);
-    const exact = games.find((g) => normalizeIgdbTitle(g?.name) === wanted);
-    if (exact) return exact;
-    const prefix = games.find((g) => {
-      const name = normalizeIgdbTitle(g?.name);
-      return name && wanted && (name.startsWith(wanted) || wanted.startsWith(name));
-    });
-    return prefix || games[0];
-  };
-
   // IPC: Buscar trailers/videos de un juego en IGDB
   ipcMain.handle('fetch-igdb-videos', async (event, title) => {
     if (!title) return { success: false, error: 'Título no proporcionado' };
 
     try {
-      const response = await fetch(`${WORKER_API_BASE}/api/game?title=${encodeURIComponent(title)}`);
-      if (!response.ok) {
-        return { success: false, error: `Worker API respondió ${response.status}` };
-      }
-
-      const data = await response.json();
-      if (!data.success || !data.games || data.games.length === 0) {
+      const data = await fetchIgdbFullData(title);
+      if (!data || !data.success || !data.games || data.games.length === 0) {
         return { success: false, error: 'No se encontró el juego en IGDB' };
       }
 
@@ -2420,13 +3758,8 @@ app.whenReady().then(async () => {
     };
 
     try {
-      const response = await fetch(`${WORKER_API_BASE}/api/game?title=${encodeURIComponent(title)}`);
-      if (!response.ok) {
-        return { success: false, error: `Worker API respondió ${response.status}` };
-      }
-
-      const data = await response.json();
-      if (!data.success || !data.games || data.games.length === 0) {
+      const data = await fetchIgdbFullData(title);
+      if (!data || !data.success || !data.games || data.games.length === 0) {
         return { success: false, error: 'No se encontró el juego en IGDB' };
       }
 
@@ -2512,8 +3845,7 @@ app.whenReady().then(async () => {
       }
     }
 
-    data.games = (data.games || []).map(injectMediaToBase64);
-    data.media = (data.media || []).map(injectMediaToBase64);
+    // Ya NO inyectamos base64 de juegos/media: el renderer carga las imágenes vía local-file://
     return data;
   });
 
@@ -2536,6 +3868,27 @@ app.whenReady().then(async () => {
     }
 
     fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+
+    // Descargar arte en segundo plano para asegurar soporte offline
+    cacheAppArtwork(appData).then(({ app: cachedApp, modified }) => {
+      if (modified) {
+        try {
+          const freshData = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+          const list = cachedApp.type === 'game' ? (freshData.games || []) : (freshData.media || []);
+          const idx = list.findIndex(it => it.id === cachedApp.id);
+          if (idx !== -1) {
+            list[idx] = cachedApp;
+            fs.writeFileSync(dbPath, JSON.stringify(freshData, null, 2));
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('app-updated', cachedApp);
+            }
+          }
+        } catch (e) {
+          console.warn('[MediaCache] Error actualizando arte cacheado tras save-app:', e.message);
+        }
+      }
+    }).catch(() => {});
+
     return data;
   });
 
@@ -2580,7 +3933,11 @@ app.whenReady().then(async () => {
           platform: 'Spotify',
           ...filteredUpdate
         });
-      } else if (updatedApp.id.toString().startsWith('steam_') || updatedApp.id.toString().startsWith('epic_')) {
+      } else if (
+        updatedApp.id.toString().startsWith('steam_') ||
+        updatedApp.id.toString().startsWith('epic_') ||
+        updatedApp.id.toString().startsWith('xbox_')
+      ) {
         // Solo agregar a la DB si tiene título real, evitando crear registros fantasma vacíos
         if (updatedApp.title && updatedApp.title.trim() && updatedApp.title !== 'Juego') {
           data.games = data.games || [];
@@ -2597,6 +3954,29 @@ app.whenReady().then(async () => {
     }
 
     fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
+
+    // Descargar arte en segundo plano para soporte offline si contiene URLs remotas
+    cacheAppArtwork(updatedApp).then(({ app: cachedApp, modified }) => {
+      if (modified) {
+        try {
+          const freshData = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+          const list = (freshData.games || []).some(it => it.id === cachedApp.id)
+            ? freshData.games
+            : (freshData.media || []);
+          const idx = list.findIndex(it => it.id === cachedApp.id);
+          if (idx !== -1) {
+            list[idx] = { ...list[idx], ...cachedApp };
+            fs.writeFileSync(dbPath, JSON.stringify(freshData, null, 2));
+            if (mainWindow && !mainWindow.isDestroyed()) {
+              mainWindow.webContents.send('app-updated', list[idx]);
+            }
+          }
+        } catch (e) {
+          console.warn('[MediaCache] Error actualizando arte cacheado tras update-app:', e.message);
+        }
+      }
+    }).catch(() => {});
+
     return { success: true, data };
   });
 
@@ -2963,6 +4343,65 @@ app.whenReady().then(async () => {
       startSteamGameWatch(id, heroicMatch[1], installDir, 'Epic', { title: appRecord?.title, image: resolveAppRecordThumbnail(appRecord) });
       return { success: true, suspended: true };
     }
+
+    // Caso especial: shell:AppsFolder\<aumid> (Xbox Game Pass / Microsoft Store / UWP)
+    const shellAppsMatch = executablePath.match(/^shell:AppsFolder[\\/](.+)$/i);
+    if (shellAppsMatch) {
+      const aumid = shellAppsMatch[1].trim();
+      // PackageFamilyName = parte antes del '!' en el AUMID (ej: "Microsoft.MinecraftUWP_8wekyb3d8bbwe")
+      const packageFamilyName = aumid.includes('!') ? aumid.split('!')[0] : null;
+      const installDir = findXboxGameInstallDir(aumid) || findXboxGameInstallDir(id);
+
+      console.log('[Xbox] Lanzando juego Store/Game Pass vía shell:AppsFolder:', aumid, 'installDir:', installDir, 'pfn:', packageFamilyName);
+      const psLaunch = `Start-Process "shell:AppsFolder\\${aumid}"`;
+      const b64 = Buffer.from(psLaunch, 'utf16le').toString('base64');
+      exec(`powershell -NoProfile -NonInteractive -EncodedCommand ${b64}`, (err) => {
+        if (err) {
+          console.error('[Xbox] Error con Start-Process, intentando con explorer.exe:', err);
+          spawn('explorer.exe', [`shell:AppsFolder\\${aumid}`], { detached: true, stdio: 'ignore' });
+        }
+      });
+
+      // Usar tanto el installDir como el PFN para detectar el proceso del juego
+      const watchDir = installDir || '';
+      startSteamGameWatch(id, aumid, watchDir, 'Xbox', {
+        title: appRecord?.title,
+        image: resolveAppRecordThumbnail(appRecord),
+      }, { packageFamilyName });
+      return { success: true, suspended: true };
+    }
+
+    // Caso especial: gamelaunchhelper.exe o ejecutable dentro de XboxGames
+    const isXboxFolderLaunch = !linux && (lowerPath.includes('xboxgames') || lowerPath.endsWith('gamelaunchhelper.exe'));
+    if (isXboxFolderLaunch) {
+      const installDir = findXboxGameInstallDir(executablePath) || path.dirname(executablePath);
+      console.log('[Xbox] Lanzando ejecutable Xbox Game Pass:', executablePath, 'dir:', installDir);
+
+      // Intentar obtener el PFN desde el caché de Xbox para mejorar la detección del proceso
+      const xboxEntry = xboxGamesCache.find(g =>
+        g.installLocation && installDir && g.installLocation.toLowerCase() === installDir.toLowerCase()
+      );
+      const packageFamilyName = xboxEntry?.aumid?.includes('!')
+        ? xboxEntry.aumid.split('!')[0]
+        : null;
+
+      const gameCwd = path.dirname(executablePath);
+      spawn(executablePath, [], {
+        cwd: gameCwd,
+        env: envForExternalApp(),
+        detached: true,
+        stdio: 'ignore',
+      });
+
+      if (installDir) {
+        startSteamGameWatch(id, path.basename(installDir), installDir, 'Xbox', {
+          title: appRecord?.title,
+          image: resolveAppRecordThumbnail(appRecord),
+        }, { packageFamilyName });
+        return { success: true, suspended: true };
+      }
+    }
+
     // URLs y protocolos (http://, etc.)
     if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(executablePath)) {
       if (shouldLaunchWebFullscreen(executablePath, appRecord)) {
@@ -3026,10 +4465,18 @@ app.whenReady().then(async () => {
       gameExited = true;
       if (hideTimer) clearTimeout(hideTimer);
       hideTrayIcon();
-      // ── NUEVO ──
-      disableOverlayHotkey();
-      stopGamepadOverlayListener();
+      // ── Limpieza de overlay y pollers tras salir del juego ──
+      hideOverlayWindow();
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        try { overlayWindow.destroy(); } catch (_) {}
+        overlayWindow = null;
+      }
+      stopTrophyPoller(id); // detener polling de logros
       activeGameInfo = null;
+      if (!overlayEnabled) {
+        disableOverlayHotkey();
+        stopGamepadOverlayListener();
+      }
 
       if (mainWindow) {
         mainWindow.webContents.send('game-closed', id);
@@ -3104,9 +4551,16 @@ app.whenReady().then(async () => {
     return { success: true, suspended: true };
   });
 
+  const showOpenDialogWithParent = (options) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      return dialog.showOpenDialog(mainWindow, options);
+    }
+    return dialog.showOpenDialog(options);
+  };
+
   // IPC: Abrir diálogo para seleccionar ejecutable
   ipcMain.handle('select-file', async () => {
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogWithParent({
       properties: ['openFile', 'noResolveAliases'],
       filters: [
         ...(linux ? [{ name: 'Aplicaciones Linux', extensions: ['*'] }] : [{ name: 'Ejecutables', extensions: ['exe', 'bat', 'lnk', 'url'] }]),
@@ -3121,7 +4575,7 @@ app.whenReady().then(async () => {
 
   // IPC: Abrir diálogo para seleccionar imagen (portada)
   ipcMain.handle('select-image', async () => {
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogWithParent({
       properties: ['openFile'],
       filters: [{ name: 'Imágenes', extensions: ['jpg', 'png', 'jpeg', 'webp'] }]
     });
@@ -3133,7 +4587,7 @@ app.whenReady().then(async () => {
 
   // IPC: Abrir diálogo para seleccionar video
   ipcMain.handle('select-video', async () => {
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogWithParent({
       properties: ['openFile'],
       filters: [{ name: 'Videos', extensions: ['mp4', 'webm', 'mkv', 'avi'] }]
     });
@@ -3145,7 +4599,7 @@ app.whenReady().then(async () => {
 
   // IPC: Abrir diálogo para seleccionar audio de foco del juego.
   ipcMain.handle('select-audio', async () => {
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogWithParent({
       properties: ['openFile'],
       filters: [{ name: 'Audio', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'aac', 'flac'] }]
     });
@@ -3157,7 +4611,7 @@ app.whenReady().then(async () => {
 
   // IPC: Abrir diálogo para seleccionar carpeta de capturas
   ipcMain.handle('select-capture-folder', async () => {
-    const result = await dialog.showOpenDialog({
+    const result = await showOpenDialogWithParent({
       properties: ['openDirectory']
     });
     if (!result.canceled && result.filePaths.length > 0) {
@@ -3663,13 +5117,8 @@ app.whenReady().then(async () => {
     if (!title) return { success: false, error: 'Título no proporcionado' };
 
     try {
-      const response = await fetch(`${WORKER_API_BASE}/api/game?title=${encodeURIComponent(title)}`);
-      if (!response.ok) {
-        return { success: false, error: `Worker API respondió ${response.status}` };
-      }
-
-      const json = await response.json();
-      if (json.success && json.games && json.games.length > 0) {
+      const json = await fetchIgdbFullData(title);
+      if (json && json.success && json.games && json.games.length > 0) {
         return { success: true, data: pickBestIgdbMatch(json.games, title) };
       }
 
@@ -3684,17 +5133,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('fetch-steamgrid-data', async (event, title) => {
     if (!title) return { success: false, error: 'Título no proporcionado' };
 
-    console.log('Buscando en SteamGridDB via Worker:', title);
-
     try {
-      const response = await fetch(`${WORKER_API_BASE}/api/steamgrid?title=${encodeURIComponent(title)}`);
-      if (!response.ok) {
-        return { success: false, error: `Worker respondió ${response.status}` };
-      }
-
-      const json = await response.json();
-      if (!json.success || !json.game) {
-        return { success: false, error: json.error || 'Juego no encontrado en SteamGridDB' };
+      const json = await fetchSteamGridFullData(title);
+      if (!json || !json.success || !json.game) {
+        return { success: false, error: json?.error || 'Juego no encontrado en SteamGridDB' };
       }
 
       // Portada: prioriza cuadradas 1:1 (quedan mejor en el launcher),
@@ -3728,17 +5170,10 @@ app.whenReady().then(async () => {
   ipcMain.handle('fetch-steamgrid-assets', async (event, title) => {
     if (!title) return { success: false, error: 'Título no proporcionado' };
 
-    console.log('Buscando todos los assets en SteamGridDB via Worker para:', title);
-
     try {
-      const response = await fetch(`${WORKER_API_BASE}/api/steamgrid?title=${encodeURIComponent(title)}`);
-      if (!response.ok) {
-        return { success: false, error: `Worker respondió ${response.status}` };
-      }
-
-      const json = await response.json();
-      if (!json.success || !json.game) {
-        return { success: false, error: json.error || 'Juego no encontrado en SteamGridDB' };
+      const json = await fetchSteamGridFullData(title);
+      if (!json || !json.success || !json.game) {
+        return { success: false, error: json?.error || 'Juego no encontrado en SteamGridDB' };
       }
 
       return {
@@ -3753,6 +5188,217 @@ app.whenReady().then(async () => {
     } catch (error) {
       console.error('Error buscando todos los assets en SteamGridDB via Worker:', error);
       return { success: false, error: error.message };
+    }
+  });
+
+  // IPC: Descargar y guardar en caché local una URL de imagen para soporte offline
+  ipcMain.handle('cache-media-url', async (_event, url) => {
+    if (!url || typeof url !== 'string') return url;
+    return downloadAndCacheMedia(url);
+  });
+
+  // ── KHINSIDER SCRAPER & MUSIC DOWNLOADER ─────────────────────────────────
+  let khinsiderScraperWindow = null;
+
+  function getKhinsiderScraperWindow() {
+    if (khinsiderScraperWindow && !khinsiderScraperWindow.isDestroyed()) {
+      return khinsiderScraperWindow;
+    }
+    khinsiderScraperWindow = new BrowserWindow({
+      show: false,
+      width: 1280,
+      height: 800,
+      webPreferences: {
+        offscreen: true,
+        images: false,
+        webSecurity: false,
+      },
+    });
+    return khinsiderScraperWindow;
+  }
+
+  ipcMain.handle('khinsider-search', async (_event, query) => {
+    if (!query || typeof query !== 'string') return { success: false, albums: [] };
+    const cleanQuery = query.trim();
+    if (!cleanQuery) return { success: false, albums: [] };
+
+    try {
+      const url = `https://downloads.khinsider.com/search?search=${encodeURIComponent(cleanQuery)}`;
+      let html = '';
+
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const res = await fetch(url, {
+          signal: controller.signal,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        });
+        clearTimeout(timeout);
+        if (res.ok) {
+          html = await res.text();
+        }
+      } catch (_) {}
+
+      if (!html || html.includes('challenges.cloudflare.com') || html.includes('Just a moment')) {
+        const win = getKhinsiderScraperWindow();
+        await win.loadURL(url);
+        await new Promise((r) => setTimeout(r, 1800));
+        html = await win.webContents.executeJavaScript('document.documentElement.outerHTML');
+      }
+
+      const albums = [];
+      const rowRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+      let rowMatch;
+      while ((rowMatch = rowRegex.exec(html)) !== null) {
+        const rowHtml = rowMatch[1];
+        if (rowHtml.includes('<th')) continue;
+
+        const cells = [];
+        const cellRegex = /<td[^>]*>([\s\S]*?)<\/td>/gi;
+        let cellMatch;
+        while ((cellMatch = cellRegex.exec(rowHtml)) !== null) {
+          cells.push(cellMatch[1]);
+        }
+        if (cells.length < 2) continue;
+
+        const imgMatch = cells[0].match(/<img[^>]+src="([^"]+)"/i);
+        const cover = imgMatch ? imgMatch[1] : '';
+
+        const titleLinkMatch = cells[1].match(/<a\s+href="(\/game-soundtracks\/album\/[^"]+)">([\s\S]*?)<\/a>/i);
+        if (!titleLinkMatch) continue;
+
+        const albumPath = titleLinkMatch[1];
+        const albumUrl = albumPath.startsWith('http') ? albumPath : `https://downloads.khinsider.com${albumPath}`;
+        const title = titleLinkMatch[2].replace(/<[^>]+>/g, '').trim();
+        const platform = (cells[2] || '').replace(/<[^>]+>/g, '').trim();
+        const type = (cells[3] || '').replace(/<[^>]+>/g, '').trim();
+        const year = (cells[4] || '').replace(/<[^>]+>/g, '').trim();
+
+        albums.push({
+          id: albumPath.replace('/game-soundtracks/album/', ''),
+          title,
+          albumUrl,
+          cover,
+          platform,
+          type,
+          year,
+        });
+      }
+
+      return { success: true, albums };
+    } catch (err) {
+      console.error('[KHInsider] Error searching:', err);
+      return { success: false, error: err.message, albums: [] };
+    }
+  });
+
+  ipcMain.handle('khinsider-get-album', async (_event, albumUrl) => {
+    if (!albumUrl) return { success: false, error: 'URL requerida' };
+    try {
+      const win = getKhinsiderScraperWindow();
+      await win.loadURL(albumUrl);
+
+      const start = Date.now();
+      let hasSonglist = false;
+      while (Date.now() - start < 9000) {
+        try {
+          hasSonglist = await win.webContents.executeJavaScript('!!document.getElementById("songlist")');
+          if (hasSonglist) break;
+        } catch (_) {}
+        await new Promise((r) => setTimeout(r, 400));
+      }
+
+      if (!hasSonglist) {
+        return { success: false, error: 'No se pudo cargar la lista de canciones del álbum' };
+      }
+
+      const albumData = await win.webContents.executeJavaScript(`(() => {
+        const titleEl = document.querySelector('h2') || document.querySelector('h1');
+        const title = titleEl ? titleEl.innerText.trim() : document.title.split('MP3')[0].trim();
+        const cover = document.querySelector('.albumImage img')?.src ||
+                      document.querySelector('img[src*="soundtracks"]')?.src || '';
+
+        const rows = Array.from(document.querySelectorAll('#songlist tr:not(#songlist_header)'));
+        const tracks = [];
+
+        for (const row of rows) {
+          const link = row.querySelector('.playlistRow a') ||
+                       row.querySelector('a[href*="/game-soundtracks/album/"]');
+          if (!link) continue;
+
+          const cells = Array.from(row.querySelectorAll('td')).map((td) => td.innerText.trim());
+          const durationCell = cells.find((c) => /^\\d{1,2}:\\d{2}$/.test(c)) || '';
+          const numberCell = cells.find((c) => /^\\d{1,3}\\.?$/.test(c)) || '';
+          const sizeCell = cells.find((c) => /\\d+\\.?\\d*\\s*(MB|KB)/i.test(c)) || '';
+
+          tracks.push({
+            number: numberCell.replace(/\\.$/, ''),
+            title: link.innerText.trim(),
+            duration: durationCell,
+            size: sizeCell,
+            trackUrl: link.href,
+          });
+        }
+
+        return { title, cover, tracks };
+      })()`);
+
+      return { success: true, album: albumData };
+    } catch (err) {
+      console.error('[KHInsider] Error getting album:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('khinsider-get-track-audio', async (_event, trackPageUrl) => {
+    if (!trackPageUrl) return { success: false, error: 'URL requerida' };
+    try {
+      const win = getKhinsiderScraperWindow();
+      await win.loadURL(trackPageUrl);
+
+      const start = Date.now();
+      let audioUrl = null;
+      while (Date.now() - start < 8000) {
+        try {
+          audioUrl = await win.webContents.executeJavaScript(`(() => {
+            const audioEl = document.querySelector('audio source') || document.querySelector('audio');
+            if (audioEl && audioEl.src && audioEl.src.startsWith('http')) return audioEl.src;
+            const mp3Link = document.querySelector('a[href$=".mp3"]');
+            if (mp3Link && mp3Link.href.startsWith('http')) return mp3Link.href;
+            const anyAudio = Array.from(document.querySelectorAll('a')).find((a) =>
+              (a.href.includes('.mp3') || a.href.includes('.flac') || a.href.includes('.ogg')) &&
+              !a.href.includes('/album/')
+            );
+            return anyAudio ? anyAudio.href : null;
+          })()`);
+          if (audioUrl) break;
+        } catch (_) {}
+        await new Promise((r) => setTimeout(r, 350));
+      }
+
+      if (!audioUrl) {
+        return { success: false, error: 'No se encontró archivo de audio reproducible' };
+      }
+
+      return { success: true, audioUrl };
+    } catch (err) {
+      console.error('[KHInsider] Error getting track audio:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('khinsider-download-track', async (_event, audioUrl) => {
+    if (!audioUrl || typeof audioUrl !== 'string') return { success: false, error: 'URL requerida' };
+    try {
+      const localUri = await downloadAndCacheMedia(audioUrl);
+      return { success: true, localUri };
+    } catch (err) {
+      console.error('[KHInsider] Error downloading track:', err);
+      return { success: false, error: err.message, localUri: audioUrl };
     }
   });
 
@@ -3934,6 +5580,17 @@ app.whenReady().then(async () => {
     }
   });
 
+  // IPC: Obtener juegos instalados localmente de Xbox Game Pass / Microsoft Store
+  ipcMain.handle('get-xbox-installed-games', async () => {
+    try {
+      const games = getXboxInstalledGames();
+      return { success: true, games };
+    } catch (error) {
+      console.error('[Xbox] Error getting installed games:', error);
+      return { success: false, games: [], error: error.message };
+    }
+  });
+
   // IPC: Obtener lista de programas instalados en Windows (estilo Steam)
   ipcMain.handle('get-installed-programs', async () => {
     if (linux) return { success: true, programs: await linux.getInstalledPrograms() };
@@ -4045,11 +5702,31 @@ app.whenReady().then(async () => {
       }
     } catch (_) { }
 
+    // Incluir juegos de Xbox Game Pass / Microsoft Store si existen
+    try {
+      const xboxGames = getXboxInstalledGames();
+      for (const xg of xboxGames) {
+        const normPath = (xg.launchPath || xg.installLocation).toLowerCase();
+        const normName = xg.title.toLowerCase();
+        if (!seenPaths.has(normPath) && !seenNames.has(normName)) {
+          seenPaths.add(normPath);
+          seenNames.add(normName);
+          programs.push({
+            name: xg.title,
+            path: xg.launchPath || xg.installLocation,
+            icon: xg.icon || null,
+            source: 'xbox',
+          });
+        }
+      }
+    } catch (_) { }
+
     programs.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
 
     // Extraer icono base64 para cada programa mediante app.getFileIcon
     const programsWithIcons = await Promise.all(
       programs.map(async (p) => {
+        if (p.icon) return p;
         let iconBase64 = null;
         try {
           const iconNative = await app.getFileIcon(p.path, { size: 'normal' });
@@ -4324,6 +6001,38 @@ app.whenReady().then(async () => {
     return { success: true };
   });
 
+  // ── IPC: Notificación de trofeo manual (desde el renderer al cerrar el juego) ──
+  ipcMain.handle('show-trophy-notification', async (_event, achievement, gameInfo) => {
+    try {
+      enqueueTrophyNotification(achievement, gameInfo || {});
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  // ── IPC: Credenciales Steam del perfil activo (respuesta al main tras lanzar juego) ──
+  ipcMain.handle('set-active-steam-credentials', async (_event, creds) => {
+    // Guardamos las credenciales temporalmente para que startTrophyPoller las use
+    // si el juego ya fue lanzado (race condition de timing al arrancar).
+    if (creds && creds.steamId && creds.apiKey) {
+      activeSteamCreds = creds;
+      if (activeGameInfo) {
+        const numericAppId = typeof activeGameInfo.appId === 'string'
+          ? parseInt(activeGameInfo.appId, 10)
+          : activeGameInfo.appId;
+        if (Number.isFinite(numericAppId) && numericAppId > 0 && !trophyPollerMap.has(activeGameInfo.id)) {
+          startTrophyPoller(activeGameInfo.id, numericAppId, creds.apiKey, creds.steamId, {
+            id: activeGameInfo.id,
+            title: activeGameInfo.title,
+            image: activeGameInfo.image,
+          });
+        }
+      }
+    }
+    return { success: true };
+  });
+
   ipcMain.handle('show-main-window-to-switch-game', async () => {
     hideOverlayWindow();
     if (activeGameInfo) {
@@ -4351,16 +6060,22 @@ app.whenReady().then(async () => {
         overlayEnabled = settings.enabled;
         if (!overlayEnabled) {
           hideOverlayWindow();
+          if (overlayWindow && !overlayWindow.isDestroyed()) {
+            try { overlayWindow.destroy(); } catch (_) {}
+            overlayWindow = null;
+          }
           disableOverlayHotkey();
           stopGamepadOverlayListener();
-        } else if (activeGameInfo) {
+        } else {
           enableOverlayHotkey();
           startGamepadOverlayListener();
+          // No pre-cargar createOverlayWindow() aquí para evitar consumir ~700MB de RAM en segundo plano;
+          // el overlay se inicializa bajo demanda la primera vez que se activa vía showOverlay()
         }
       }
       if (settings.combo) {
         overlayCombo = settings.combo;
-        if (overlayEnabled && activeGameInfo) {
+        if (overlayEnabled) {
           startGamepadOverlayListener();
         }
       }
@@ -4370,6 +6085,80 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('get-overlay-settings', async () => {
     return { enabled: overlayEnabled, combo: overlayCombo };
+  });
+
+  // ── Captura de combo personalizado desde mando ─────────────────────────────
+  // Lanza xinput-watcher en modo --capture: espera a que el usuario pulse
+  // una combinación de botones en cualquier mando y devuelve el combo
+  // detectado como string en formato RAW:<b0>,<b1>,... listo para usarse
+  // directamente como overlayCombo.
+  ipcMain.handle('capture-overlay-combo', async () => {
+    if (process.platform !== 'win32') {
+      return { success: false, error: 'only-windows' };
+    }
+    const xinputExe = resolveXinputWatcherPath();
+    if (!xinputExe) {
+      return { success: false, error: 'exe-not-found' };
+    }
+
+    return new Promise((resolve) => {
+      let captureChild = null;
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        try { if (captureChild) captureChild.kill(); } catch (_) {}
+        resolve(result);
+      };
+
+      // Timeout de seguridad: si el proceso tarda más de 18 s lo cancelamos
+      const safetyTimer = setTimeout(() => {
+        finish({ success: false, error: 'timeout' });
+      }, 18000);
+
+      try {
+        captureChild = spawn(xinputExe, ['--capture'], {
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        let buffer = '';
+        captureChild.stdout.on('data', (data) => {
+          buffer += data.toString();
+          const lines = buffer.split('\n');
+          buffer = lines.pop(); // última línea incompleta
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line) continue;
+            if (line.startsWith('COMBO:')) {
+              // Convertir a formato RAW: para overlayCombo
+              const indices = line.substring(6); // "b0,b1,..."
+              clearTimeout(safetyTimer);
+              finish({ success: true, combo: 'RAW:' + indices });
+            } else if (line === 'TIMEOUT') {
+              clearTimeout(safetyTimer);
+              finish({ success: false, error: 'timeout' });
+            } else if (line === 'DONE') {
+              clearTimeout(safetyTimer);
+              // DONE llegará después de COMBO:; si no recibimos COMBO antes, ignorar
+            }
+          }
+        });
+
+        captureChild.on('error', (err) => {
+          clearTimeout(safetyTimer);
+          finish({ success: false, error: err.message });
+        });
+
+        captureChild.on('exit', () => {
+          clearTimeout(safetyTimer);
+          if (!settled) finish({ success: false, error: 'process-exited' });
+        });
+      } catch (err) {
+        clearTimeout(safetyTimer);
+        finish({ success: false, error: err.message });
+      }
+    });
   });
 
   ipcMain.handle('set-launcher-play-behavior', async (_event, behavior) => {
@@ -4385,6 +6174,11 @@ app.whenReady().then(async () => {
 
   createWindow();
 
+  // Inicializar overlay en arranque si está habilitado
+  if (overlayEnabled) {
+    enableOverlayHotkey();
+    startGamepadOverlayListener();
+  }
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -4405,6 +6199,7 @@ app.on('before-quit', () => {
   globalShortcut.unregisterAll();
   showWindowsTaskbar(); // red de seguridad: nunca dejar la taskbar oculta al salir
   if (overlayWindow && !overlayWindow.isDestroyed()) overlayWindow.destroy();
+  stopAllTrophyPollers(); // detener todos los pollers de logros activos
   for (const id of Array.from(activeGameWatchers.keys())) {
     stopSteamGameWatch(id);
   }

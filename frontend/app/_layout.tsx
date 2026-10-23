@@ -1,31 +1,34 @@
 import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { useFonts } from 'expo-font';
+import { Image } from 'expo-image';
 import { Stack, usePathname } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { Image } from 'expo-image';
-import { useFonts } from 'expo-font';
-import { useState, useEffect, useRef, useMemo } from 'react';
-import { View, StyleSheet, Linking, Platform } from 'react-native';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Linking, Platform, StyleSheet, View } from 'react-native';
 import Animated, {
-  useSharedValue,
-  useAnimatedStyle,
-  withTiming,
-  runOnJS,
-  FadeOut
+    FadeOut,
+    runOnJS,
+    useAnimatedStyle,
+    useSharedValue,
+    withTiming
 } from 'react-native-reanimated';
 
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useColorScheme } from '@/hooks/use-color-scheme';
+import BackgroundVideo from '@/components/BackgroundVideo';
+import FpsOverlay from '@/components/FpsOverlay';
+import ToastHost from '@/components/ToastHost';
 import UserSelectScreen, { UserProfile } from '@/components/UserSelectScreen';
-import { UserContext } from '@/contexts/UserContext';
-import { ThemeProvider as WPSThemeProvider } from '@/contexts/ThemeContext';
+import ErrorBoundary from '@/components/ErrorBoundary';
 import { LanguageProvider, useTranslation } from '@/contexts/LanguageContext';
+import { ThemeProvider as WPSThemeProvider } from '@/contexts/ThemeContext';
+import { UserContext } from '@/contexts/UserContext';
+import { useColorScheme } from '@/hooks/use-color-scheme';
+import { useFpsMeter } from '@/hooks/useFpsMeter';
 import { isLanguage } from '@/i18n/translations';
 import { openWebLink } from '@/services/linkService';
 import { setCurrentOnlineProfileId } from '@/services/onlineAccountService';
-import ToastHost from '@/components/ToastHost';
-import { toastService } from '@/services/toastService';
-import BackgroundVideo from '@/components/BackgroundVideo';
 import { soundService } from '@/services/soundService';
+import { toastService } from '@/services/toastService';
+import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import OverlayScreen from './overlay';
 
 export const unstable_settings = {
@@ -133,7 +136,9 @@ export default function RootLayout() {
 
   return (
     <LanguageProvider>
-      <RootLayoutInner />
+      <ErrorBoundary fallbackTitle="Ha ocurrido un error en la interfaz">
+        <RootLayoutInner />
+      </ErrorBoundary>
     </LanguageProvider>
   );
 }
@@ -153,6 +158,20 @@ function RootLayoutInner() {
   const pathname = usePathname();
   const isOverlayMode = checkIsOverlay() || pathname === '/overlay' || pathname?.includes('overlay');
 
+  // Diagnóstico de errores no controlados y rechazos de promesas en la ventana
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const onErr = (e: ErrorEvent) => console.error('[window.error]', e.error || e.message);
+      const onRej = (e: PromiseRejectionEvent) => console.error('[unhandledrejection]', e.reason);
+      window.addEventListener('error', onErr);
+      window.addEventListener('unhandledrejection', onRej);
+      return () => {
+        window.removeEventListener('error', onErr);
+        window.removeEventListener('unhandledrejection', onRej);
+      };
+    }
+  }, []);
+
   // Splash de arranque: video personalizado del último usuario; si no tiene
   // (o falla), el video por defecto; si este también falla, solo el logo.
   const customBootActive = !!bootVideoUri && !bootVideoFailed;
@@ -167,6 +186,26 @@ function RootLayoutInner() {
   // Los hooks van antes de cualquier return temprano.
   const [homeReady, setHomeReady] = useState(false);
 
+  // ── Contador de fps (diagnóstico de fluidez) ──────────────────────────────
+  // Se activa desde Ajustes -> GPU & Performance -> "Show FPS Counter".
+  const showFpsCounter = !!(activeUser?.settings as any)?.showFpsCounter;
+  const fpsReading = useFpsMeter(showFpsCounter);
+  const [displayRefreshRate, setDisplayRefreshRate] = useState(0);
+
+  useEffect(() => {
+    if (!showFpsCounter) return;
+    const api = (window as any).electronAPI;
+    if (!api?.getDisplayInfo) return;
+    let cancelled = false;
+    api.getDisplayInfo()
+      .then((info: any) => {
+        if (cancelled) return;
+        setDisplayRefreshRate(info?.primaryRefreshRate || info?.targetRefreshRate || 0);
+      })
+      .catch(() => { });
+    return () => { cancelled = true; };
+  }, [showFpsCounter]);
+
   useEffect(() => {
     if (!activeUser) { setHomeReady(false); return; }
     let finished = false;
@@ -174,17 +213,22 @@ function RootLayoutInner() {
       if (finished) return;
       finished = true;
       clearTimeout(safety);
-      setHomeReady(true);
-      // El aviso de bienvenida sale cuando la capa de carga ya se está retirando.
+      // Pequeño delay de presentación: garantiza que la animación de rebote
+      // complete al menos medio ciclo más (900 ms) y que el browser haya
+      // terminado de pintar el primer frame del home antes de retirar el overlay.
       setTimeout(() => {
-        toastService.show(tRef.current('toast.loggedPS5'), {
-          source: 'system',
-          icon: require('@/assets/icons/Logonegro.png'),
-        });
-      }, 500);
+        setHomeReady(true);
+        // El aviso de bienvenida sale cuando la capa de carga ya se está retirando.
+        setTimeout(() => {
+          toastService.show(tRef.current('toast.loggedPS5'), {
+            source: 'system',
+            icon: require('@/assets/icons/Logonegro.png'),
+          });
+        }, 500);
+      }, 900);
     };
     window.addEventListener('wps5-home-ready', done, { once: true });
-    const safety = setTimeout(done, 8000); // red de seguridad
+    const safety = setTimeout(done, 8000); // red de seguridad (incluye el delay de 900 ms de presentación)
     return () => {
       window.removeEventListener('wps5-home-ready', done);
       clearTimeout(safety);
@@ -280,6 +324,46 @@ function RootLayoutInner() {
     },
   };
 
+  // ── UserContext ──────────────────────────────────────────────────────────
+  // Estos hooks deben declararse ANTES de cualquier return temprano: si se
+  // llamaran después del `if (isOverlayMode)` su orden cambiaría entre
+  // renders y React se quejaría.
+  const changeUser = useCallback(() => {
+    setActiveUser(null);
+  }, []);
+
+  const updateUser = useCallback(async (updates: Partial<UserProfile>) => {
+    setActiveUser(prevUser => {
+      if (!prevUser) return prevUser;
+      const newUser = { ...prevUser, ...updates };
+      const savedUsers = localStorage.getItem('console_users');
+      if (savedUsers) {
+        const usersList: UserProfile[] = JSON.parse(savedUsers);
+        const updatedList = usersList.map(u => u.id === newUser.id ? newUser : u);
+        localStorage.setItem('console_users', JSON.stringify(updatedList));
+        if ((window as any).electronAPI) {
+          (window as any).electronAPI.saveUsers(updatedList).catch(console.error);
+        }
+      }
+      if (updates.settings && (window as any).electronAPI?.setOverlaySettings) {
+        (window as any).electronAPI.setOverlaySettings({
+          enabled: newUser.settings?.overlayEnabled !== false,
+          combo: newUser.settings?.overlayCombo || 'SELECT_START',
+        });
+      }
+      return newUser;
+    });
+  }, []);
+
+  // El valor del contexto debe mantener una identidad estable: si se recrea
+  // en cada render, todos los consumidores de useUser() (Home, widgets,
+  // biblioteca, ajustes...) se re-renderizan en cascada aunque nada haya
+  // cambiado, y eso hunde el frame rate.
+  const userContextValue = useMemo(
+    () => ({ activeUser, changeUser, updateUser }),
+    [activeUser, changeUser, updateUser]
+  );
+
   if (isOverlayMode) {
     return (
       <View style={{ flex: 1, backgroundColor: 'transparent' }}>
@@ -310,29 +394,6 @@ function RootLayoutInner() {
     }
   };
 
-  const updateUser = async (updates: Partial<UserProfile>) => {
-    setActiveUser(prevUser => {
-      if (!prevUser) return prevUser;
-      const newUser = { ...prevUser, ...updates };
-      const savedUsers = localStorage.getItem('console_users');
-      if (savedUsers) {
-        const usersList: UserProfile[] = JSON.parse(savedUsers);
-        const updatedList = usersList.map(u => u.id === newUser.id ? newUser : u);
-        localStorage.setItem('console_users', JSON.stringify(updatedList));
-        if ((window as any).electronAPI) {
-          (window as any).electronAPI.saveUsers(updatedList).catch(console.error);
-        }
-      }
-      if (updates.settings && (window as any).electronAPI?.setOverlaySettings) {
-        (window as any).electronAPI.setOverlaySettings({
-          enabled: newUser.settings?.overlayEnabled !== false,
-          combo: newUser.settings?.overlayCombo || 'SELECT_START',
-        });
-      }
-      return newUser;
-    });
-  };
-
   // UserSelectScreen vive en la misma posición del árbol antes y después de
   // elegir perfil, así que NO se remonta: sigue mostrando al usuario elegido
   // con el radar pulsando mientras Home se monta detrás, y se retira con un
@@ -340,7 +401,7 @@ function RootLayoutInner() {
   const showSelectLayer = !activeUser || !homeReady;
 
   return (
-    <UserContext.Provider value={{ activeUser, changeUser: () => setActiveUser(null), updateUser }}>
+    <UserContext.Provider value={userContextValue}>
       <WPSThemeProvider>
         <style dangerouslySetInnerHTML={{
           __html: GLOBAL_CSS_FONTS
@@ -348,16 +409,18 @@ function RootLayoutInner() {
         <View style={{ flex: 1, backgroundColor: activeUser ? 'transparent' : '#000' }}>
           {activeUser && (
             <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-              <Stack
-                screenOptions={{
-                  headerShown: false,
-                  contentStyle: { backgroundColor: 'transparent' },
-                }}
-              >
-                <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-                <Stack.Screen name="overlay" options={{ headerShown: false, contentStyle: { backgroundColor: 'transparent' } }} />
-                <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
-              </Stack>
+              <ErrorBoundary fallbackTitle="Ha ocurrido un error en la interfaz">
+                <Stack
+                  screenOptions={{
+                    headerShown: false,
+                    contentStyle: { backgroundColor: 'transparent' },
+                  }}
+                >
+                  <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+                  <Stack.Screen name="overlay" options={{ headerShown: false, contentStyle: { backgroundColor: 'transparent' } }} />
+                  <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
+                </Stack>
+              </ErrorBoundary>
               <ToastHost />
               <StatusBar style="auto" />
             </ThemeProvider>
@@ -400,6 +463,8 @@ function RootLayoutInner() {
             </Animated.View>
           )}
           {!activeUser && <StatusBar style="light" />}
+
+          <FpsOverlay reading={fpsReading} displayRefreshRate={displayRefreshRate} />
         </View>
       </WPSThemeProvider>
     </UserContext.Provider>

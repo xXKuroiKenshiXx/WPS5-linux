@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSteamInstalledApps: () => ipcRenderer.invoke('get-steam-installed-apps'),
   getSteamInstalledAppsDetailed: () => ipcRenderer.invoke('get-steam-installed-apps-detailed'),
   getEpicInstalledGames: () => ipcRenderer.invoke('get-epic-installed-games'),
+  getXboxInstalledGames: () => ipcRenderer.invoke('get-xbox-installed-games'),
   getInstalledPrograms: () => ipcRenderer.invoke('get-installed-programs'),
   detectEmulatorExe: (exeNames) => ipcRenderer.invoke('detect-emulator-exe', exeNames),
   scanRoms: (dir, extensions, specialFiles) => ipcRenderer.invoke('scan-roms', dir, extensions, specialFiles),
@@ -48,6 +49,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('game-closed', listener);
     return () => ipcRenderer.removeListener('game-closed', listener);
   },
+  onLauncherSuspended: (callback) => {
+    const listener = (_event, suspended) => callback(suspended);
+    ipcRenderer.on('launcher-suspended', listener);
+    return () => ipcRenderer.removeListener('launcher-suspended', listener);
+  },
+  onAppUpdated: (callback) => {
+    const listener = (_event, app) => callback(app);
+    ipcRenderer.on('app-updated', listener);
+    return () => ipcRenderer.removeListener('app-updated', listener);
+  },
+  cacheMediaUrl: (url) => ipcRenderer.invoke('cache-media-url', url),
+  khinsiderSearch: (query) => ipcRenderer.invoke('khinsider-search', query),
+  khinsiderGetAlbum: (albumUrl) => ipcRenderer.invoke('khinsider-get-album', albumUrl),
+  khinsiderGetTrackAudio: (trackPageUrl) => ipcRenderer.invoke('khinsider-get-track-audio', trackPageUrl),
+  khinsiderDownloadTrack: (audioUrl) => ipcRenderer.invoke('khinsider-download-track', audioUrl),
   removeGameClosedListener: () => ipcRenderer.removeAllListeners('game-closed'),
   getMediaSessions: () => ipcRenderer.invoke('get-media-sessions'),
   mediaControl: (action, target) => ipcRenderer.invoke('media-control', action, target),
@@ -95,6 +111,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   hideOverlay: () => ipcRenderer.invoke('hide-overlay'),
   setOverlaySettings: (settings) => ipcRenderer.invoke('set-overlay-settings', settings),
   getOverlaySettings: () => ipcRenderer.invoke('get-overlay-settings'),
+  captureOverlayCombo: () => ipcRenderer.invoke('capture-overlay-combo'),
   setLauncherPlayBehavior: (behavior) => ipcRenderer.invoke('set-launcher-play-behavior', behavior),
   getLauncherPlayBehavior: () => ipcRenderer.invoke('get-launcher-play-behavior'),
   showMainWindowToSwitchGame: () => ipcRenderer.invoke('show-main-window-to-switch-game'),
@@ -104,6 +121,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('overlay-shown', listener);
     return () => ipcRenderer.removeListener('overlay-shown', listener);
   },
+  // ── Trofeos en tiempo real ────────────────────────────────────────────────
+  // El main process notifica al renderer cuando detecta un logro desbloqueado
+  // durante la sesión de juego. El renderer reproduce el sonido.
+  onTrophyUnlocked: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('trophy-unlocked', listener);
+    return () => ipcRenderer.removeListener('trophy-unlocked', listener);
+  },
+  // Envía las credenciales Steam del perfil activo al main process para que
+  // pueda iniciar el poller de logros sin acceder al localStorage del renderer.
+  setActiveSteamCredentials: (creds) => ipcRenderer.invoke('set-active-steam-credentials', creds),
+  // Muestra una notificación de trofeo desde el renderer (p.ej. al cerrar el juego).
+  showTrophyNotification: (achievement, gameInfo) => ipcRenderer.invoke('show-trophy-notification', achievement, gameInfo),
   // ── Splash Videos (SteamDeckRepo) ─────────────────────────────────────────
   // Descarga un video de boot/suspend desde SteamDeckRepo y lo guarda en
   // userData/WConsole/splash/{boot|suspend}.webm. Devuelve
@@ -119,6 +149,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteImageFile: (filePath) => ipcRenderer.invoke('delete-image-file', filePath),
   // ── Info de GPU / Aceleración por hardware ──────────────────────────────
   getGpuInfo: () => ipcRenderer.invoke('get-gpu-info'),
+  // ── Info de displays / frecuencia de refresco (alto refresco) ───────────
+  // Devuelve { displays, primaryRefreshRate, targetRefreshRate,
+  // highRefreshMode, highRefreshApplied }.
+  getDisplayInfo: () => ipcRenderer.invoke('get-display-info'),
+  // Cambia el modo de alto refresco ('auto' | 'on' | 'off'). El switch de
+  // Chromium solo se puede aplicar al arrancar: requiere reiniciar.
+  setHighRefreshMode: (mode) => ipcRenderer.invoke('set-high-refresh-mode', mode),
   // ── Batería de mandos PlayStation (DualShock 4 / DualSense) vía HID ─────────
   // Devuelve [{ vendorId, productId, model, battery (0..1 | null), charging, wired }].
   getPsBatteries: () => ipcRenderer.invoke('get-ps-batteries'),

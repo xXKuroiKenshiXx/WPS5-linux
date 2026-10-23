@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import { View, Text, StyleSheet, TouchableOpacity, Modal, Platform, TextInput, ScrollView, useWindowDimensions, Linking } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
@@ -35,6 +36,7 @@ import { useTranslation } from '@/contexts/LanguageContext';
 import BackgroundVideo from './BackgroundVideo';
 import { toastService } from '@/services/toastService';
 import VirtualKeyboard from './VirtualKeyboard';
+import KHInsiderMusicModal from './KHInsiderMusicModal';
 
 
 interface GameDetailViewProps {
@@ -47,19 +49,37 @@ interface GameDetailViewProps {
   inputMode: 'keyboard' | 'gamepad';
   installedSteamAppIds?: Set<string> | null;
   onOpenMediaGallery?: () => void;
+  /** Abre la vista de trofeos con la lista de logros del juego. */
+  onOpenTrophies?: () => void;
   /** Hay un mando conectado. El teclado virtual solo se muestra si es true. */
-  gamepadConnected: boolean;
+  gamepadConnected?: boolean;
+  initialEditMode?: boolean;
 }
 
-// Normaliza un string de path/url de editData a un source { uri } válido.
-// Maneja: http(s) URLs, paths locales con o sin prefijo local-file://.
-const resolveEditSource = (val: string | undefined): { uri: string } | null => {
+// Normaliza cualquier tipo de source (string, { uri }, require number) de editData a un source válido para expo-image.
+const resolveEditSource = (val: any): { uri: string } | number | null => {
   if (!val) return null;
-  if (val.startsWith('http')) return { uri: val };
-  // Quitar cualquier variante de local-file:// que ya venga en el string
-  const clean = val.replace(/^local-file:\/+/, '');
-  // Reconstruir siempre con local-file:///
+  if (typeof val === 'number') return val;
+  if (typeof val === 'object' && val.uri) return val;
+  if (typeof val !== 'string') return null;
+  const str = val.trim();
+  if (!str) return null;
+  if (str.startsWith('http://') || str.startsWith('https://') || str.startsWith('data:') || str.startsWith('blob:')) {
+    return { uri: str };
+  }
+  const clean = str.replace(/^local-file:\/+/, '').replace(/\\/g, '/');
   return { uri: `local-file:///${clean}` };
+};
+
+const extractPathFromSource = (src: any): string | undefined => {
+  if (!src) return undefined;
+  if (typeof src === 'string') {
+    return src.replace(/^local-file:\/+/, '').replace(/\\/g, '/');
+  }
+  if (typeof src === 'object' && typeof src.uri === 'string') {
+    return src.uri.replace(/^local-file:\/+/, '').replace(/\\/g, '/');
+  }
+  return undefined;
 };
 
 const DetailLightboxImage = React.memo(({
@@ -115,7 +135,7 @@ const DetailLightboxImage = React.memo(({
 });
 DetailLightboxImage.displayName = 'DetailLightboxImage';
 
-const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClose, onLaunch, onRefresh, isLaunching, inputMode, installedSteamAppIds = null, onOpenMediaGallery, gamepadConnected }) => {
+const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClose, onLaunch, onRefresh, isLaunching, inputMode, installedSteamAppIds = null, onOpenMediaGallery, onOpenTrophies, gamepadConnected = false, initialEditMode = false }) => {
   const [isEditModalVisible, setEditModalVisible] = useState(false);
   const [isDeleteConfirmVisible, setDeleteConfirmVisible] = useState(false);
   const [editData, setEditData] = useState<Partial<ConsoleItem>>({});
@@ -129,6 +149,11 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
   const [editVKField, setEditVKFieldState] = useState<'title' | 'description' | 'path' | 'launchArgs' | null>(null);
   const { activeUser } = useUser();
   const [selectedMediaIndex, setSelectedMediaIndex] = useState<number | null>(null);
+  const [isKhinsiderModalVisible, setKhinsiderModalVisible] = useState(false);
+
+  // ─── Audio de foco local (se reproduce dentro del GameDetailView) ───────────
+  const detailAudioRef = useRef<AudioPlayer | null>(null);
+  const detailAudioPathRef = useRef<string | null>(null);
 
   // States for SteamGridDB Asset Selector Screen
   const [isAssetSelectorVisible, setAssetSelectorVisible] = useState(false);
@@ -570,36 +595,35 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [assetSelectorTab]);
 
-  const applySelectedAsset = async (url: string) => {
+  const saveQueueRef = useRef<Promise<any>>(Promise.resolve());
+
+  const persistPartial = (partial: Record<string, any>) => {
+    const gameId = editData.id || item?.id;
+    if (!gameId || !(window as any).electronAPI) return;
+    const payload = { id: gameId, title: editData.title || item?.title, ...partial };
+    saveQueueRef.current = saveQueueRef.current
+      .then(() => (window as any).electronAPI.updateApp(payload))
+      .then((r: any) => {
+        if (r?.success) onRefresh?.(payload);
+      })
+      .catch((e: any) => console.error('[Detail] error guardando', e));
+  };
+
+  const applySelectedAsset = (url: string) => {
     const tab = assetSelectorTab;
-    let updatedData = { ...editData };
+    const field =
+      tab === 'hero' ? 'backgroundImage' :
+      tab === 'logo' ? 'logo' :
+      tab === 'icon' ? 'icon' : 'image';
 
-    if (tab === 'capsule' || tab === 'capsule_wide') {
-      updatedData.image = url;
-    } else if (tab === 'hero') {
-      updatedData.backgroundImage = url;
-    } else if (tab === 'logo') {
-      updatedData.logo = url;
-    } else if (tab === 'icon') {
-      (updatedData as any).icon = url;
-    }
-
-    setEditData(updatedData);
+    setEditData((prev) => ({ ...prev, [field]: url }));
     soundService.playActivation?.();
     // No cerramos el selector: el usuario puede cambiar de pestaña (cápsula,
     // imagen principal, logo, ícono) y seleccionar una imagen para cada una
     // antes de volver atrás, en vez de tener que reabrir el selector por cada tipo.
 
-    // Auto-save to database
-    if (Platform.OS === 'web' && (window as any).electronAPI && updatedData.id) {
-      const cleanData = Object.fromEntries(
-        Object.entries(updatedData).filter(([_, v]) => v !== '' && v !== null && v !== undefined)
-      );
-      const result = await (window as any).electronAPI.updateApp(cleanData);
-      if (result.success) {
-        if (onRefresh) onRefresh(cleanData);
-      }
-    }
+    // Auto-save parcial serializado para evitar saturación de memoria e IPC
+    persistPartial({ [field]: url });
   };
 
   // Determina si un asset del grid es el que está actualmente asignado al
@@ -633,38 +657,29 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
 
   const handleManageAction = async (idx: number) => {
     if (!(window as any).electronAPI) return;
-    let updatedData = { ...editData };
 
     if (idx === 0) {
       const img = await (window as any).electronAPI.selectImage();
-      if (img) updatedData.image = img;
-      else return;
+      if (img) {
+        setEditData((prev) => ({ ...prev, image: img }));
+        persistPartial({ image: img });
+      }
     } else if (idx === 1) {
       const img = await (window as any).electronAPI.selectImage();
-      if (img) updatedData.logo = img;
-      else return;
+      if (img) {
+        setEditData((prev) => ({ ...prev, logo: img }));
+        persistPartial({ logo: img });
+      }
     } else if (idx === 2) {
       const img = await (window as any).electronAPI.selectImage();
-      if (img) updatedData.backgroundImage = img;
-      else return;
-    } else if (idx === 3) {
-      updatedData.image = undefined;
-      updatedData.logo = undefined;
-      updatedData.backgroundImage = undefined;
-    }
-
-    setEditData(updatedData);
-
-    // Auto-save to database
-    if (updatedData.id) {
-      const cleanData = Object.fromEntries(
-        Object.entries(updatedData).filter(([_, v]) => v !== '' && v !== null && v !== undefined)
-      );
-      const result = await (window as any).electronAPI.updateApp(cleanData);
-      if (result.success) {
-        if (onRefresh) onRefresh(cleanData);
-        if (idx === 3) toastService.show(t('edit.assetsReset'));
+      if (img) {
+        setEditData((prev) => ({ ...prev, backgroundImage: img }));
+        persistPartial({ backgroundImage: img });
       }
+    } else if (idx === 3) {
+      setEditData((prev) => ({ ...prev, image: undefined, logo: undefined, backgroundImage: undefined }));
+      persistPartial({ image: '', logo: '', backgroundImage: '' });
+      toastService.show(t('edit.assetsReset'));
     }
   };
 
@@ -906,22 +921,26 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
     infoCardsAnim.value = withTiming(focusIndex >= 4 ? 0 : 1, { duration: 300 });
   }, [focusIndex]);
 
-  // Auto-scroll del panel inferior en GameDetailView para mantener la fila enfocada en pantalla
+  // Auto-scroll del panel inferior en GameDetailView para mantener la fila enfocada en pantalla.
+  // Los valores anteriores eran coordenadas fijas que NO tenían en cuenta que GameInfoPanel
+  // colapsa las secciones superiores (maxHeight → 0, 300 ms) cuando se navega hacia abajo.
+  // Una vez que esas animaciones terminan, el elemento enfocado siempre queda en y≈0 del
+  // ScrollView (sólo el paddingTop=60 queda como margen visual). Por eso scrolleamos a y=0
+  // con un retraso mínimo mayor que la duración de la animación (350 ms).
   useEffect(() => {
     if (!isVisible || !bottomScrollRef.current) return;
+    // Al volver al área de título/botones el panel baja a su posición original
     if (focusIndex <= 1) {
       bottomScrollRef.current.scrollTo({ y: 0, animated: true });
-    } else if (focusIndex === 2 || focusIndex === 3) {
-      bottomScrollRef.current.scrollTo({ y: 160, animated: true });
-    } else if (focusIndex >= 100 && focusIndex < 200) {
-      bottomScrollRef.current.scrollTo({ y: 240, animated: true });
-    } else if (focusIndex === 300) {
-      bottomScrollRef.current.scrollTo({ y: 900, animated: true });
-    } else if (focusIndex >= 200) {
-      bottomScrollRef.current.scrollTo({ y: 380, animated: true });
-    } else if (focusIndex >= 4 && focusIndex < 100) {
-      bottomScrollRef.current.scrollTo({ y: 620, animated: true });
+      return;
     }
+    // Para cualquier sección inferior (cards, capturas, logros, noticias, metadata)
+    // las secciones precedentes se colapsan via GameInfoPanel (maxHeight→0, 300 ms).
+    // Esperamos 320 ms para que el layout se estabilice y luego scrolleamos a 0.
+    const timer = setTimeout(() => {
+      bottomScrollRef.current?.scrollTo({ y: 0, animated: true });
+    }, 320);
+    return () => clearTimeout(timer);
   }, [focusIndex, isVisible]);
 
   // Reset card layout cache whenever the paginated list (or page) changes
@@ -1085,31 +1104,116 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
 
 
   useEffect(() => {
-    if (item) {
+    if (item && isVisible) {
       prevFocusIndexRef.current = 0;
       setFocusIndex(0); // Reset focus when opening
       setAchievementCount(0);
-      const initialData: any = {
-        id: item.id,
-        title: item.title,
-        description: isSteamGame(item) && isPlaytimePlaceholder(item.description) ? '' : item.description,
-        rating: item.rating,
-        image: item.image?.uri?.startsWith('local-file://') ? item.image.uri.replace(/^local-file:\/+/, '') : (item.image?.uri?.startsWith('http') ? item.image.uri : undefined),
-        logo: item.logo?.uri?.startsWith('local-file://') ? item.logo.uri.replace(/^local-file:\/+/, '') : (item.logo?.uri?.startsWith('http') ? item.logo.uri : undefined),
-        backgroundImage: item.backgroundImage?.uri?.startsWith('local-file://') ? item.backgroundImage.uri.replace(/^local-file:\/+/, '') : (item.backgroundImage?.uri?.startsWith('http') ? item.backgroundImage.uri : undefined),
-        video: item.video?.uri?.startsWith('local-file://') ? item.video.uri.replace(/^local-file:\/+/, '') : (item.video?.uri?.startsWith('http') ? item.video.uri : undefined),
-        focusAudio: item.focusAudio,
-        youtubeId: item.youtubeId,
-        platform: item.platform,
-        retroSystem: (item as any).retroSystem,
-        path: getSteamLaunchPath(item) || item.path || undefined,
-        type: item.type,
-        launchArgs: item.launchArgs,
-      };
-
-      setEditData(initialData);
+      setEditData((prev) => {
+        const isSameGame = prev?.id === item.id;
+        const initialData: any = {
+          id: item.id,
+          title: (isSameGame && prev.title !== undefined) ? prev.title : item.title,
+          description: (isSameGame && prev.description !== undefined) ? prev.description : (isSteamGame(item) && isPlaytimePlaceholder(item.description) ? '' : item.description),
+          rating: (isSameGame && prev.rating !== undefined) ? prev.rating : item.rating,
+          image: (isSameGame && prev.image !== undefined) ? prev.image : extractPathFromSource(item.image),
+          logo: (isSameGame && prev.logo !== undefined) ? prev.logo : extractPathFromSource(item.logo),
+          backgroundImage: (isSameGame && prev.backgroundImage !== undefined) ? prev.backgroundImage : extractPathFromSource(item.backgroundImage),
+          video: (isSameGame && prev.video !== undefined) ? prev.video : extractPathFromSource(item.video),
+          focusAudio: (isSameGame && prev.focusAudio !== undefined) ? prev.focusAudio : item.focusAudio,
+          youtubeId: (isSameGame && prev.youtubeId !== undefined) ? prev.youtubeId : item.youtubeId,
+          platform: (isSameGame && prev.platform !== undefined) ? prev.platform : item.platform,
+          retroSystem: (isSameGame && (prev as any).retroSystem !== undefined) ? (prev as any).retroSystem : (item as any).retroSystem,
+          path: (isSameGame && prev.path !== undefined) ? prev.path : (getSteamLaunchPath(item) || item.path || undefined),
+          type: (isSameGame && prev.type !== undefined) ? prev.type : item.type,
+          launchArgs: (isSameGame && prev.launchArgs !== undefined) ? prev.launchArgs : item.launchArgs,
+        };
+        return initialData;
+      });
     }
-  }, [item, isVisible]);
+  }, [item?.id, isVisible]);
+
+  useEffect(() => {
+    if (isVisible && initialEditMode) {
+      setEditModalVisible(true);
+    } else if (!isVisible) {
+      setEditModalVisible(false);
+    }
+  }, [isVisible, initialEditMode]);
+
+  // ─── Reproducir focusAudio dentro del GameDetailView ────────────────────────
+  // Cuando el panel se abre y el juego tiene audio asignado, lo reproduce en loop.
+  // Se detiene al cerrar el panel o al abrir un video (trailer/gameplay).
+  useEffect(() => {
+    if (!isVisible || Platform.OS !== 'web') return;
+
+    const audioPath: string | undefined = (editData.focusAudio as string | undefined) ?? (item?.focusAudio as string | undefined);
+
+    if (!audioPath) {
+      // No hay audio: limpiar si había algo reproduciéndose
+      if (detailAudioRef.current) {
+        try { detailAudioRef.current.remove(); } catch (_) {}
+        detailAudioRef.current = null;
+        detailAudioPathRef.current = null;
+      }
+      return;
+    }
+
+    // Si es el mismo audio ya en reproducción, no hacer nada
+    if (detailAudioPathRef.current === audioPath && detailAudioRef.current) return;
+
+    // Detener el audio anterior si cambió
+    if (detailAudioRef.current) {
+      try { detailAudioRef.current.remove(); } catch (_) {}
+      detailAudioRef.current = null;
+    }
+
+    detailAudioPathRef.current = audioPath;
+
+    const uri = audioPath.startsWith('http') || audioPath.startsWith('local-file://')
+      ? audioPath
+      : `local-file:///${audioPath.replace(/\\/g, '/')}`;
+
+    let mounted = true;
+    const startAudio = async () => {
+      try {
+        await soundService.pauseBackground();
+        if (!mounted) return;
+        const player = createAudioPlayer(uri);
+        player.loop = true;
+        player.volume = 0.8;
+        player.play();
+        if (!mounted) { try { player.remove(); } catch (_) {} return; }
+        detailAudioRef.current = player;
+      } catch (err) {
+        console.warn('[GameDetailView] No se pudo reproducir focusAudio:', err);
+        if (mounted && !isLaunching) soundService.playBackground();
+      }
+    };
+
+    void startAudio();
+
+    return () => {
+      mounted = false;
+      if (detailAudioRef.current) {
+        try { detailAudioRef.current.remove(); } catch (_) {}
+        detailAudioRef.current = null;
+        detailAudioPathRef.current = null;
+      }
+      if (!isLaunching) soundService.playBackground();
+    };
+  }, [isVisible, editData.focusAudio, item?.focusAudio, isLaunching]);
+
+  // ─── Pausar/reanudar audio de foco al abrir/cerrar trailers ─────────────────
+  useEffect(() => {
+    if (!detailAudioRef.current) return;
+    const media = selectedMediaIndex !== null ? steamMedia[selectedMediaIndex] : null;
+    const isVideo = media?.type === 'movie';
+    if (isVideo) {
+      try { detailAudioRef.current.pause(); } catch (_) {}
+    } else {
+      try { detailAudioRef.current.play(); } catch (_) {}
+    }
+  }, [selectedMediaIndex, steamMedia]);
 
   // Steam: si la descripción es el placeholder de tiempo jugado (o está vacía),
   // traer la descripción real en el idioma del usuario
@@ -1160,7 +1264,7 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
           e.preventDefault();
         }
 
-        if (isDeleteConfirmVisible) {
+        if (isDeleteConfirmVisible || isKhinsiderModalVisible) {
           return;
         }
 
@@ -1238,9 +1342,10 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
             else if (editModalFocusIndex === 0) setEditModalFocusIndex(15);
             else if (editModalFocusIndex === 15) setEditModalFocusIndex(17);
             else if (editModalFocusIndex === 16) setEditModalFocusIndex(18);
-            else if (editModalFocusIndex === 17) setEditModalFocusIndex(20); // to Cancel
-            else if (editModalFocusIndex === 18) setEditModalFocusIndex(26);
-            else if (editModalFocusIndex === 26) setEditModalFocusIndex(21); // to Save
+            else if (editModalFocusIndex === 17) setEditModalFocusIndex(26);
+            else if (editModalFocusIndex === 18) setEditModalFocusIndex(28);
+            else if (editModalFocusIndex === 26) setEditModalFocusIndex(20); // to Cancel
+            else if (editModalFocusIndex === 28) setEditModalFocusIndex(21); // to Save
 
             // Actions
             else if (editModalFocusIndex >= 19 && editModalFocusIndex <= 21) { }
@@ -1278,7 +1383,8 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
             else if (editModalFocusIndex === 16) setEditModalFocusIndex(0);
             else if (editModalFocusIndex === 17) setEditModalFocusIndex(15);
             else if (editModalFocusIndex === 18) setEditModalFocusIndex(16);
-            else if (editModalFocusIndex === 26) setEditModalFocusIndex(18);
+            else if (editModalFocusIndex === 26) setEditModalFocusIndex(17);
+            else if (editModalFocusIndex === 28) setEditModalFocusIndex(18);
 
             // Actions
             else if (editModalFocusIndex >= 19 && editModalFocusIndex <= 21) {
@@ -1300,7 +1406,7 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
             else if (editModalFocusIndex >= 50 && editModalFocusIndex < 50 + retroCount - 1) setEditModalFocusIndex(prev => prev + 1);
             else if (editModalFocusIndex === 15) setEditModalFocusIndex(16);
             else if (editModalFocusIndex === 17) setEditModalFocusIndex(18);
-            else if (editModalFocusIndex === 18) setEditModalFocusIndex(26);
+            else if (editModalFocusIndex === 26) setEditModalFocusIndex(28);
 
             // Actions
             else if (editModalFocusIndex >= 19 && editModalFocusIndex < 21) setEditModalFocusIndex(prev => prev + 1);
@@ -1327,6 +1433,7 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
             else if (editModalFocusIndex === 16) setEditModalFocusIndex(15);
             else if (editModalFocusIndex === 18) setEditModalFocusIndex(17);
             else if (editModalFocusIndex === 26) setEditModalFocusIndex(25);
+            else if (editModalFocusIndex === 28) setEditModalFocusIndex(26);
 
             // Actions
             else if (editModalFocusIndex > 19 && editModalFocusIndex <= 21) setEditModalFocusIndex(prev => prev - 1);
@@ -1356,6 +1463,7 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
             else if (editModalFocusIndex === 17) openAssetSelector('hero');
             else if (editModalFocusIndex === 18) handleSelectVideo();
             else if (editModalFocusIndex === 26) handleSelectFocusAudio();
+            else if (editModalFocusIndex === 28) setKhinsiderModalVisible(true);
             else if (editModalFocusIndex === 19) handleDeleteApp();
             else if (editModalFocusIndex === 20) setEditModalVisible(false);
             else if (editModalFocusIndex === 21) handleSaveEdit();
@@ -1461,6 +1569,9 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
             }
           } else if (focusIndex === 1) {
             setEditModalVisible(true);
+          } else if (focusIndex === 2) {
+            // El widget de trofeos abre la vista con la lista de logros.
+            onOpenTrophies?.();
           } else if (focusIndex >= 100 && focusIndex < 200) {
             const media = steamMedia[focusIndex - 100];
             if (media) setSelectedMediaIndex(focusIndex - 100);
@@ -1481,6 +1592,7 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
     isEditModalVisible,
     isDeleteConfirmVisible,
     isAssetSelectorVisible,
+    isKhinsiderModalVisible,
     selectedMediaIndex,
     focusIndex,
     achievementCount,
@@ -1575,10 +1687,12 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
   };
 
   const handleSaveEdit = async () => {
-    if ((window as any).electronAPI && editData.id) {
+    const gameId = editData.id || item?.id;
+    if ((window as any).electronAPI && gameId) {
       // Limpiamos los campos vacíos o undefined para no sobrescribir con valores nulos en la DB
       const cleanData = Object.fromEntries(
-        Object.entries(editData).filter(([_, v]) => v !== '' && v !== null && v !== undefined)
+        Object.entries({ ...editData, id: gameId, title: editData.title || item?.title })
+          .filter(([_, v]) => v !== '' && v !== null && v !== undefined)
       );
 
       const result = await (window as any).electronAPI.updateApp(cleanData);
@@ -1869,6 +1983,7 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
                 }}
                 setSelectedItem={() => { }}
                 setDetailVisible={setEditModalVisible}
+                onOpenConfig={() => setEditModalVisible(true)}
                 steamMedia={steamMedia}
                 mediaLoading={mediaLoading}
                 setSelectedMediaIndex={setSelectedMediaIndex}
@@ -1884,6 +1999,7 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
                 installedSteamAppIds={installedSteamAppIds}
                 onAchievementCountChange={setAchievementCount}
                 onOpenMediaGallery={onOpenMediaGallery}
+                onOpenTrophies={onOpenTrophies}
               />
             </Animated.View>
           </ScrollView>
@@ -2421,6 +2537,17 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
                                 {editData.focusAudio ? t('edit.fileSelected') : t('edit.musicDesc')}
                               </Text>
                             </TouchableOpacity>
+
+                            <TouchableOpacity
+                              style={[styles.editArtFileBtn, editModalFocusIndex === 28 && styles.editArtFileBtnFocused]}
+                              onPress={() => { setEditModalFocusIndex(28); setKhinsiderModalVisible(true); }}
+                            >
+                              <Ionicons name="disc-outline" size={s(24)} color="#38EF7D" style={{ marginBottom: 6 }} />
+                              <Text style={styles.artFileBtnTitle}>{t('edit.khinsiderMusic')}</Text>
+                              <Text style={styles.artFileBtnSub} numberOfLines={1}>
+                                {editData.focusAudio ? t('edit.fileSelected') : t('edit.khinsiderMusicSub')}
+                              </Text>
+                            </TouchableOpacity>
                           </View>
                         </ScrollView>
                       </>
@@ -2904,6 +3031,23 @@ const GameDetailView: React.FC<GameDetailViewProps> = ({ isVisible, item, onClos
                 }
               }}
               onClose={() => setEditVKField(null)}
+            />
+
+            {/* KHINSIDER MUSIC SELECTOR OVERLAY */}
+            <KHInsiderMusicModal
+              isVisible={isKhinsiderModalVisible}
+              onClose={() => setKhinsiderModalVisible(false)}
+              currentGameTitle={editData.title || item?.title || ''}
+              currentFocusAudio={editData.focusAudio}
+              onSelectTrack={async (localAudioUri) => {
+                setEditData((prev) => ({ ...prev, focusAudio: localAudioUri }));
+                persistPartial({ focusAudio: localAudioUri });
+              }}
+              onRemoveAudio={async () => {
+                setEditData((prev) => ({ ...prev, focusAudio: undefined }));
+                persistPartial({ focusAudio: '' });
+              }}
+              gamepadConnected={gamepadConnected}
             />
           </View>
         </Modal>

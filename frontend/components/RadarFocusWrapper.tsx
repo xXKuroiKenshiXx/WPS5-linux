@@ -11,69 +11,85 @@ interface RadarFocusWrapperProps {
     borderRadius?: string | number; // Por si usas tarjetas cuadradas o circulares
 }
 
-function startRadarAnimation(canvasId: string, size: number): () => void {
-    const canvas = document.getElementById(canvasId) as HTMLCanvasElement | null;
-    if (!canvas) return () => { };
-    const ctx = canvas.getContext('2d')!;
+// ── Estilos globales del radar ───────────────────────────────────────────────
+// Antes el radar se dibujaba sobre un <canvas>: 360 arcos (uno por grado)
+// con su propio beginPath/stroke en CADA frame. Eso eran ~360 rasterizaciones
+// de canvas por frame, que saturaban el hilo principal y dejaban el launcher
+// a 60 fps aunque el monitor fuera de 165 Hz.
+//
+// Ahora el radar es CSS puro: un aro (border + máscara) con un gradiente
+// cónico que gira. Solo anima `transform`, así que la mueve el compositor
+// en la GPU sin ningún JS por frame.
+const RADAR_GLOBAL_STYLE_ID = 'wps5-radar-global-styles';
 
-    // Dimensiones dinámicas basadas en el prop 'size'
-    const cx = size / 2;
-    const cy = size / 2;
-    const R = (size / 2) - 5;
-    const LINE = 2.5;
-    const CYCLE = 12;
-    let start: number | null = null;
-    let rafId: number;
+const RADAR_GLOBAL_CSS = `
+  /* ── ARO BASE ──────────────────────────────────────────────────────────────
+     El aro se dibuja con un border real + border-radius 50%. El navegador
+     antialiasa el borde de una circunferencia, así que el contorno queda
+     limpio a cualquier resolución.
 
-    const easeInOut = (t: number) => (t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t);
+     Antes se recortaba con un radial-gradient enmascarado con parada en seco
+     (transparent 0 calc(100% - 2.5px)): ese salto brusco NO lo antialiasa el
+     rasterizador, por lo que el borde interior del aro salía escalonado
+     ("pixelado"). Medido: el perfil de luminancia pasaba de 0 a 254 de un
+     píxel al siguiente. */
+  .wps5-radar-base {
+    position: absolute;
+    border-radius: 50%;
+    box-sizing: border-box;
+    pointer-events: none;
+    z-index: 0;
+    border: var(--wps5-radar-t, 3px) solid rgba(255, 255, 255, 0.42);
+  }
 
-    const draw = (ts: number) => {
-        if (!start) start = ts;
-        const elapsed = ((ts - start) / 1000) % CYCLE;
-        ctx.clearRect(0, 0, size, size);
+  /* ── BARRIDO ───────────────────────────────────────────────────────────────
+     Gradiente cónico con los MISMOS colores que los SpinningBorder (respeta
+     --wps-accent / --wps-accent-glow del tema), recortado al aro con una
+     máscara radial de bordes SUAVES: en vez de paradas en seco hay tramos
+     intermedios, de modo que el aro se difumina en los dos lados y no
+     aparece el contorno escalonado. */
+  .wps5-radar-sweep {
+    position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 0;
+    will-change: transform;
+    animation: wps5-radar-spin 9.8s linear infinite;
+    -webkit-mask-image: radial-gradient(closest-side, transparent 0 calc(100% - var(--wps5-radar-t, 3px) - 1px), rgba(0, 0, 0, 0.55) calc(100% - var(--wps5-radar-t, 3px)), #000 calc(100% - var(--wps5-radar-t, 3px) + 0.6px), #000 calc(100% - 1px), rgba(0, 0, 0, 0) 100%);
+    mask-image: radial-gradient(closest-side, transparent 0 calc(100% - var(--wps5-radar-t, 3px) - 1px), rgba(0, 0, 0, 0.55) calc(100% - var(--wps5-radar-t, 3px)), #000 calc(100% - var(--wps5-radar-t, 3px) + 0.6px), #000 calc(100% - 1px), rgba(0, 0, 0, 0) 100%);
+    background: conic-gradient(
+      from 0deg,
+      rgba(255, 255, 255, 0.15) 0%,
+      var(--wps-accent, rgba(255, 255, 255, 0.79)) 28%,
+      var(--wps-accent-glow, rgba(180, 210, 255, 0.86)) 33%,
+      rgba(220, 235, 255, 0.95) 48%,
+      rgba(255, 255, 255, 1.0) 50%,
+      var(--wps-accent, rgba(223, 248, 182, 0.95)) 52%,
+      var(--wps-accent-glow, rgba(180, 210, 255, 0.88)) 57%,
+      rgba(255, 255, 255, 0.75) 62%,
+      rgba(255, 255, 255, 0.15) 100%
+    );
+  }
 
-        let blend = 0, rotation = 0;
-        if (elapsed < 2) { blend = 0; rotation = 0; }
-        else if (elapsed < 4) { blend = easeInOut((elapsed - 2) / 2); rotation = 0; }
-        else if (elapsed < 8) { blend = 1; rotation = easeInOut((elapsed - 4) / 4) * Math.PI * 2; }
-        else if (elapsed < 10) { blend = easeInOut(1 - (elapsed - 8) / 2); rotation = Math.PI * 2; }
-        else { blend = 0; rotation = 0; }
+  @keyframes wps5-radar-spin {
+    0%   { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+  }
 
-        for (let i = 0; i < 360; i++) {
-            const angleRot = (i / 360) * Math.PI * 2 + rotation;
-            const cosVal = Math.cos(angleRot);
-            const sweepA = (cosVal + 1) / 2;
-
-            const solidAlpha = 0.55;
-            const brightAlpha = 0.65;
-            const fadeAlpha = 0.02;
-
-            let alpha: number;
-            if (blend === 0) {
-                alpha = solidAlpha;
-            } else {
-                const target = fadeAlpha + sweepA * (brightAlpha - fadeAlpha);
-                alpha = solidAlpha + blend * (target - solidAlpha);
-            }
-
-            const a0 = (i / 360) * Math.PI * 2 - Math.PI / 2;
-            const a1 = ((i + 1.8) / 360) * Math.PI * 2 - Math.PI / 2;
-            ctx.beginPath();
-            ctx.arc(cx, cy, R, a0, a1);
-            ctx.strokeStyle = `rgba(255,255,255,${Math.max(0, alpha).toFixed(3)})`;
-            ctx.lineWidth = LINE;
-            ctx.stroke();
-        }
-
-        rafId = requestAnimationFrame(draw);
-    };
-
-    rafId = requestAnimationFrame(draw);
-    return () => cancelAnimationFrame(rafId);
-}
+  /* El destello glint animaba left/top (propiedades de layout): obligaba a
+     recalcular el layout en cada frame. Ahora se desplaza con translate3d,
+     que lo resuelve el compositor sin tocar el layout. Mismo recorrido que el
+     shimmer de los SpinningBorder (48deg, entrada y salida suaves). */
+  @keyframes shimmerMove {
+    0%   { transform: translate3d(-160%, -50%, 0) rotate(48deg); opacity: 0; }
+    15%  { opacity: 1; }
+    50%  { opacity: 1; }
+    70%  { transform: translate3d(130%, -50%, 0) rotate(48deg); opacity: 0; }
+    100% { transform: translate3d(130%, -50%, 0) rotate(48deg); opacity: 0; }
+  }
+`;
 
 export default function RadarFocusWrapper({
-    id,
     isFocused,
     children,
     size = 164,
@@ -81,51 +97,58 @@ export default function RadarFocusWrapper({
     borderRadius = '50%',
 }: RadarFocusWrapperProps) {
 
-    // Inyectar los Keyframes globales de CSS de forma segura una sola vez
+    // Inyectar los estilos globales de CSS una sola vez
     useEffect(() => {
         if (Platform.OS !== 'web') return;
-        const styleId = 'radar-shimmer-global-styles';
-        if (!document.getElementById(styleId)) {
-            const style = document.createElement('style');
-            style.id = styleId;
-            style.textContent = `
-        @keyframes shimmerMove {
-          0%   { left: -100%; top: -100%; }
-          100% { left: 200%;  top: 200%;  }
-        }
-      `;
-            document.head.appendChild(style);
-        }
+        if (document.getElementById(RADAR_GLOBAL_STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = RADAR_GLOBAL_STYLE_ID;
+        style.textContent = RADAR_GLOBAL_CSS;
+        document.head.appendChild(style);
     }, []);
 
-    // Controlar la animación del radar por cada elemento de forma aislada
-    useEffect(() => {
-        if (Platform.OS !== 'web' || !isFocused) return;
+    // El anillo original se pintaba a radio (size / 2 - 5) con 2.5px de
+    // grosor. Se mantiene esa geometría (el aro queda a 5px del borde del
+    // wrapper) y el grosor se ajusta al tamaño para que no se vea ni muy
+    // fino en los avatares ni muy gordo en los iconos.
+    const ringSize = Math.max(4, size - 10);
+    const ringThickness = size >= 150 ? 3 : 2;
+    const ringOffset = (size - ringSize) / 2;
 
-        const t = setTimeout(() => {
-            const cleanup = startRadarAnimation(`radar-${id}`, size);
-            return cleanup;
-        }, 35);
-
-        return () => clearTimeout(t);
-    }, [isFocused, id, size]);
+    // El shimmer va por encima del elemento interno y centrado dentro del
+    // wrapper (offset explícito: no depende del static position de flex).
+    const shimmerOffset = Math.max(0, (size - innerSize) / 2);
 
     return (
         <View style={[styles.wrapper, { width: size, height: size }]}>
-            {/* 1. RADAR CANVAS (Detrás) */}
+            {/* 1. RADAR (Capas CSS animadas por el compositor) */}
             {isFocused && Platform.OS === 'web' && (
-                <canvas
-                    id={`radar-${id}`}
-                    width={size}
-                    height={size}
-                    style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        pointerEvents: 'none',
-                        zIndex: 0,
-                    }}
-                />
+                <>
+                    {/* Aro base: contorno siempre visible, antialiaseado */}
+                    {/* @ts-ignore */}
+                    <div
+                        className="wps5-radar-base"
+                        style={{
+                            width: ringSize,
+                            height: ringSize,
+                            left: ringOffset,
+                            top: ringOffset,
+                            ['--wps5-radar-t' as any]: `${ringThickness}px`,
+                        } as any}
+                    />
+                    {/* Barrido: gradiente cónico del tema girando */}
+                    {/* @ts-ignore */}
+                    <div
+                        className="wps5-radar-sweep"
+                        style={{
+                            width: ringSize,
+                            height: ringSize,
+                            left: ringOffset,
+                            top: ringOffset,
+                            ['--wps5-radar-t' as any]: `${ringThickness}px`,
+                        } as any}
+                    />
+                </>
             )}
 
             {/* 2. TU ELEMENTO (En el centro) */}
@@ -134,11 +157,13 @@ export default function RadarFocusWrapper({
             </View>
 
             {/* 3. SHIMMER GLINT (Encima del elemento) */}
-            {isFocused && Platform.OS === 'web' && (
+            {isFocused && innerSize > 0 && Platform.OS === 'web' && (
                 <div style={{
                     position: 'absolute',
                     width: innerSize,
                     height: innerSize,
+                    top: shimmerOffset,
+                    left: shimmerOffset,
                     borderRadius: borderRadius,
                     overflow: 'hidden',
                     pointerEvents: 'none',
@@ -146,13 +171,13 @@ export default function RadarFocusWrapper({
                 }}>
                     <div style={{
                         position: 'absolute',
-                        width: innerSize * 0.5,
-                        height: '400%',
-                        top: '-150%',
-                        left: '-100%',
-                        transform: 'rotate(35deg)',
-                        background: 'linear-gradient(to right, transparent 0%, rgba(255,255,255,0) 25%, rgba(255,255,255,0.13) 50%, rgba(255,255,255,0) 75%, transparent 100%)',
-                        animation: 'shimmerMove 6s ease-in-out infinite',
+                        width: '140%',
+                        height: '420%',
+                        top: '50%',
+                        left: '50%',
+                        willChange: 'transform',
+                        background: 'linear-gradient(to right, transparent 0%, rgba(255,255,255,0.01) 20%, rgba(255,255,255,0.18) 50%, rgba(255,255,255,0.01) 80%, transparent 100%)',
+                        animation: 'shimmerMove 5s cubic-bezier(0.42, 0, 0.58, 1) infinite',
                     }} />
                 </div>
             )}

@@ -45,3 +45,7 @@ app-example
 # Packaged desktop output
 dist-electron/
 .flatpak-builder/
+# Electron builds & diagnostics
+crash-dumps/
+repomix-output.xml
+*.bak

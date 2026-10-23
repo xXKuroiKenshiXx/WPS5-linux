@@ -2,6 +2,7 @@ import { PLATFORM_ICONS, PLATFORM_IDS, RETRO_SYSTEMS, isRetroPlatform } from '@/
 import { useTranslation } from '@/contexts/LanguageContext';
 import { isSteamGame, isSteamGameInstalled } from '@/services/steamLaunchService';
 import { isEpicGame } from '@/services/epicLaunchService';
+import { isXboxGame } from '@/services/xboxLaunchService';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { Image } from 'expo-image';
@@ -9,6 +10,7 @@ import React, { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, use
 import { Modal, Platform, Image as RNImage, ScrollView, StyleSheet, Text, TouchableOpacity, View, useWindowDimensions } from 'react-native';
 import Animated, { FadeInDown, useAnimatedStyle, useSharedValue, withDelay, withTiming } from 'react-native-reanimated';
 import { ConsoleItem } from '../app/(tabs)/index';
+import ErrorBoundary from './ErrorBoundary';
 import GameDetailView from './GameDetailView';
 import RadarFocusWrapper from './RadarFocusWrapper';
 
@@ -75,66 +77,92 @@ const FILTER_RAIL_WIDTH = 88;
 // ─── SpinningBorder Component (adapted for square/library cards) ──────────────
 // Web-only: conic-gradient spinning halo + diagonal shimmer sweep.
 // Placed INSIDE the card's TouchableOpacity so it inherits transforms.
-const SpinningBorder = ({ id }: { id: string }) => {
+//
+// Los keyframes se inyectan UNA sola vez para toda la app. Antes se creaba un
+// <style> por tarjeta con 2 @keyframes únicos, de modo que cada cambio de
+// foco montaba y desmontaba ese <style> y obligaba al navegador a reparsear
+// la hoja de estilos (keyframes + conic-gradient) entero.
+const LIB_SPIN_STYLE_ID = 'wps5-library-spin-styles';
+
+const LIB_SPIN_CSS = `
+  /* --- SPINNING HALO ANIMATION --- */
+  @keyframes lib-spin-border {
+    0%   { transform: translate3d(-50%, -50%, 0) rotate(0deg); }
+    100% { transform: translate3d(-50%, -50%, 0) rotate(360deg); }
+  }
+  .lib-spinning-inner {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 250%;
+    height: 250%;
+    will-change: transform;
+    animation: lib-spin-border 9.8s linear infinite;
+    background: conic-gradient(
+      from 0deg,
+      rgba(255, 255, 255, 0.10) 0%,
+      var(--wps-accent, rgba(255, 255, 255, 0.79)) 28%,
+      var(--wps-accent-glow, rgba(180, 210, 255, 0.86)) 33%,
+      rgba(220, 235, 255, 0.95) 48%,
+      rgba(255, 255, 255, 1.0)  50%,
+      var(--wps-accent, rgba(223, 248, 182, 0.95)) 52%,
+      var(--wps-accent-glow, rgba(180, 210, 255, 0.88)) 57%,
+      rgba(255, 255, 255, 0.75) 62%,
+      rgba(255, 255, 255, 0.10) 100%
+    );
+    border-radius: 50%;
+  }
+
+  /* --- DIAGONAL SHIMMER SWEEP ANIMATION --- */
+  @keyframes lib-shimmer {
+    0%   { transform: translate3d(-160%, -50%, 0) rotate(48deg); opacity: 0; }
+    15%  { opacity: 1; }
+    50%  { opacity: 1; }
+    70%  { transform: translate3d(130%, -50%, 0) rotate(48deg); opacity: 0; }
+    100% { transform: translate3d(130%, -50%, 0) rotate(48deg); opacity: 0; }
+  }
+  .lib-shimmer-line {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 140%;
+    height: 420%;
+    background: linear-gradient(
+      to right,
+      transparent 0%,
+      rgba(255, 255, 255, 0.01) 20%,
+      rgba(255, 255, 255, 0.15) 50%,
+      rgba(255, 255, 255, 0.01) 80%,
+      transparent 100%
+    );
+    animation: lib-shimmer 5s cubic-bezier(0.42, 0, 0.58, 1) infinite;
+  }
+`;
+
+const SpinningBorder = () => {
+  useEffect(() => {
+    if (Platform.OS !== 'web') return;
+    if (document.getElementById(LIB_SPIN_STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = LIB_SPIN_STYLE_ID;
+    style.textContent = LIB_SPIN_CSS;
+    document.head.appendChild(style);
+  }, []);
+
   if (Platform.OS !== 'web') return null;
+
+  // Fase global de las animaciones: el ángulo del halo y la posición del
+  // shimmer se derivan de la hora actual, no del tiempo de vida del elemento.
+  // Antes cada tarjeta nueva reiniciaba sus animaciones desde 0, así que al
+  // mover el foco el barrido saltaba de golpe (se veía como un parpadeo).
+  // Con el retardo negativo todas las tarjetas van en fase y el movimiento
+  // entre ellas es continuo.
+  const now = Date.now();
+  const haloDelay = `-${(now % 9800) / 1000}s`;
+  const shimmerDelay = `-${(now % 5000) / 1000}s`;
 
   return (
     <>
-      <style>{`
-        /* --- SPINNING HALO ANIMATION --- */
-        @keyframes lib-spin-border-${id} {
-          0%   { transform: translate3d(-50%, -50%, 0) rotate(0deg); }
-          100% { transform: translate3d(-50%, -50%, 0) rotate(360deg); }
-        }
-        .lib-spinning-inner-${id} {
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          width: 250%;
-          height: 250%;
-          will-change: transform;
-          animation: lib-spin-border-${id} 9.8s linear infinite;
-          background: conic-gradient(
-            from 0deg,
-            rgba(255, 255, 255, 0.10) 0%,
-            var(--wps-accent, rgba(255, 255, 255, 0.79)) 28%,
-            var(--wps-accent-glow, rgba(180, 210, 255, 0.86)) 33%,
-            rgba(220, 235, 255, 0.95) 48%,
-            rgba(255, 255, 255, 1.0)  50%,
-            var(--wps-accent, rgba(223, 248, 182, 0.95)) 52%,
-            var(--wps-accent-glow, rgba(180, 210, 255, 0.88)) 57%,
-            rgba(255, 255, 255, 0.75) 62%,
-            rgba(255, 255, 255, 0.10) 100%
-          );
-          border-radius: 50%;
-        }
-
-        /* --- DIAGONAL SHIMMER SWEEP ANIMATION --- */
-        @keyframes lib-shimmer-${id} {
-          0%   { transform: translate3d(-160%, -50%, 0) rotate(48deg); opacity: 0; }
-          15%  { opacity: 1; }
-          50%  { opacity: 1; }
-          70%  { transform: translate3d(130%, -50%, 0) rotate(48deg); opacity: 0; }
-          100% { transform: translate3d(130%, -50%, 0) rotate(48deg); opacity: 0; }
-        }
-        .lib-shimmer-line-${id} {
-          position: absolute;
-          top: 50%;
-          left: 50%;
-          width: 140%;
-          height: 420%;
-          background: linear-gradient(
-            to right,
-            transparent 0%,
-            rgba(255, 255, 255, 0.01) 20%,
-            rgba(255, 255, 255, 0.15) 50%,
-            rgba(255, 255, 255, 0.01) 80%,
-            transparent 100%
-          );
-          animation: lib-shimmer-${id} 5s cubic-bezier(0.42, 0, 0.58, 1) infinite;
-        }
-      `}</style>
-
       {/* LAYER 1: Spinning halo behind the card */}
       <View
         style={{
@@ -150,7 +178,7 @@ const SpinningBorder = ({ id }: { id: string }) => {
         pointerEvents="none"
       >
         {/* @ts-ignore */}
-        <div className={`lib-spinning-inner-${id}`} />
+        <div className="lib-spinning-inner" style={{ animationDelay: haloDelay }} />
       </View>
 
       {/* LAYER 2: Diagonal shimmer sweep over the card surface */}
@@ -168,9 +196,55 @@ const SpinningBorder = ({ id }: { id: string }) => {
         pointerEvents="none"
       >
         {/* @ts-ignore */}
-        <div className={`lib-shimmer-line-${id}`} />
+        <div className="lib-shimmer-line" style={{ animationDelay: shimmerDelay }} />
       </View>
     </>
+  );
+};
+
+// ─── CardSurface ─────────────────────────────────────────────────────────────
+// Antes TODAS las tarjetas de la rejilla usaban <BlurView>, es decir
+// `backdrop-filter: saturate(180%) blur(Npx)`. Cada elemento con
+// backdrop-filter crea su propia "backdrop root", que hay que rasterizar de
+// nuevo cada vez que cambia lo que hay detrás (vídeo de fondo, animaciones
+// de las tarjetas contiguas...). Con ~35 tarjetas visibles eso hundía el
+// compositor.
+//
+// Ahora solo la tarjeta enfocada mantiene el desenfoque (que es la que se
+// está viendo en detalle); el resto usa un fondo equivalente sin
+// backdrop-filter, con el mismo tinte oscuro que aplicaba el BlurView.
+const CardSurface = ({
+  focused,
+  style,
+  children,
+}: {
+  focused: boolean;
+  style: any;
+  children: React.ReactNode;
+}) => {
+  // IMPORTANTE: el tipo de elemento NO puede cambiar entre enfocada y no
+  // enfocada. Antes se alternaba <BlurView> y <View>: al ser componentes
+  // distintos, React DESMONTABA y REMONTABA todo el contenido de la tarjeta
+  // (imagen, iconos y overlays) en cada cambio de foco. La imagen se
+  // volvía a crear y durante un frame se veía el fondo negro de la tarjeta,
+  // además de aparecer un backdrop-filter nuevo (que Chromium rasteriza en
+  // negro el primer frame). De ahí el "espabilón" al moverse entre juegos.
+  //
+  // Ahora la tarjeta es siempre un <View> y el desenfoque se pinta como una
+  // capa aparte sólo en la tarjeta enfocada: el contenido nunca se remonta
+  // y sigue habiendo un único backdrop-filter en toda la rejilla.
+  return (
+    <View style={[style, !focused && styles.gameCardFlat]}>
+      {focused && (
+        <BlurView
+          intensity={45}
+          tint="dark"
+          style={StyleSheet.absoluteFill}
+          pointerEvents="none"
+        />
+      )}
+      {children}
+    </View>
   );
 };
 
@@ -306,7 +380,7 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
   const [isSourceSectionOpen, setIsSourceSectionOpen] = useState(false);
   const [selectedPlatforms, setSelectedPlatforms] = useState<Set<string>>(new Set());
   const [selectedRetroPlatforms, setSelectedRetroPlatforms] = useState<Set<string>>(new Set());
-  const [selectedSources, setSelectedSources] = useState<Set<'steam' | 'local' | 'epic'>>(new Set());
+  const [selectedSources, setSelectedSources] = useState<Set<'steam' | 'local' | 'epic' | 'xbox'>>(new Set());
   const [filterFavorites, setFilterFavorites] = useState(false);
   // Evita notificar al padre repetidamente cuando el filtrado produce la
   // misma lista. Sin este guard, un padre que reconstruye `games` durante
@@ -329,7 +403,7 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
     | { type: 'retroHeader' }
     | { type: 'retroOption'; id: string; label: string }
     | { type: 'sourceHeader' }
-    | { type: 'sourceOption'; id: 'steam' | 'local' | 'epic' }
+    | { type: 'sourceOption'; id: 'steam' | 'local' | 'epic' | 'xbox' }
     | { type: 'favoriteToggle' }
     | { type: 'reset' };
 
@@ -398,7 +472,12 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
     }
     rows.push({ type: 'sourceHeader' });
     if (isSourceSectionOpen) {
-      rows.push({ type: 'sourceOption', id: 'steam' }, { type: 'sourceOption', id: 'local' }, { type: 'sourceOption', id: 'epic' });
+      rows.push(
+        { type: 'sourceOption', id: 'steam' },
+        { type: 'sourceOption', id: 'local' },
+        { type: 'sourceOption', id: 'epic' },
+        { type: 'sourceOption', id: 'xbox' }
+      );
     }
     rows.push({ type: 'favoriteToggle' });
     rows.push({ type: 'reset' });
@@ -504,7 +583,7 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
     });
   };
 
-  const toggleSourceFilter = (source: 'steam' | 'local' | 'epic') => {
+  const toggleSourceFilter = (source: 'steam' | 'local' | 'epic' | 'xbox') => {
     setSelectedSources((prev) => {
       const next = new Set(prev);
       if (next.has(source)) next.delete(source);
@@ -617,9 +696,15 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
         if (!matchesRetro) return false;
       }
 
-      // 3. Filtro por fuente (steam / local / epic)
+      // 3. Filtro por fuente (steam / local / epic / xbox)
       if (selectedSources.size > 0) {
-        const source: 'steam' | 'local' | 'epic' = isSteamGame(game) ? 'steam' : isEpicGame(game) ? 'epic' : 'local';
+        const source: 'steam' | 'local' | 'epic' | 'xbox' = isSteamGame(game)
+          ? 'steam'
+          : isEpicGame(game)
+          ? 'epic'
+          : isXboxGame(game)
+          ? 'xbox'
+          : 'local';
         if (!selectedSources.has(source)) return false;
       }
 
@@ -925,6 +1010,7 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
                         { id: 'steam', label: 'Steam' },
                         { id: 'local', label: 'Local' },
                         { id: 'epic', label: 'Epic' },
+                        { id: 'xbox', label: 'Xbox' },
                       ] as const
                     ).map((opt) => {
                       const checked = selectedSources.has(opt.id);
@@ -1064,7 +1150,6 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
 
                       const isItemFocused = gridActive && focusedIndex === index;
                       const isInstalled = isGameInstalled(game);
-                      const borderId = `lib-${game.id ?? index}`;
                       const staggerDelay = Math.min(index * 24, 220);
 
                       return (
@@ -1081,11 +1166,10 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
                               isItemFocused && styles.gameCardWrapperFocused,
                             ]}
                           >
-                            {isItemFocused && <SpinningBorder id={borderId} />}
+                            {isItemFocused && <SpinningBorder />}
 
-                            <BlurView
-                              intensity={isItemFocused ? 45 : 10}
-                              tint="dark"
+                            <CardSurface
+                              focused={isItemFocused}
                               style={[
                                 styles.gameCard,
                                 isItemFocused && styles.gameCardFocused,
@@ -1243,7 +1327,7 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
                                   <View style={styles.unfocusedOverlay} />
                                 )}
                               </View>
-                            </BlurView>
+                            </CardSurface>
                           </TouchableOpacity>
                         </Animated.View>
                       );
@@ -1256,17 +1340,22 @@ const LibraryGrid = forwardRef<LibraryGridHandle, LibraryGridProps>(function Lib
         </View>
       </View>
 
-      <GameDetailView
-        isVisible={selectedGame !== null}
-        item={selectedGame}
-        onClose={() => { setSelectedGame(null); onDetailVisibilityChange?.(false); }}
-        onLaunch={onLaunch}
-        onRefresh={onRefresh}
-        isLaunching={isLaunching}
-        inputMode={inputMode}
-        gamepadConnected={inputMode === 'gamepad'}
-        installedSteamAppIds={installedSteamAppIds}
-      />
+      <ErrorBoundary
+        fallbackTitle="Error en la vista de detalles del juego"
+        onReset={() => { setSelectedGame(null); onDetailVisibilityChange?.(false); }}
+      >
+        <GameDetailView
+          isVisible={selectedGame !== null}
+          item={selectedGame}
+          onClose={() => { setSelectedGame(null); onDetailVisibilityChange?.(false); }}
+          onLaunch={onLaunch}
+          onRefresh={onRefresh}
+          isLaunching={isLaunching}
+          inputMode={inputMode}
+          gamepadConnected={inputMode === 'gamepad'}
+          installedSteamAppIds={installedSteamAppIds}
+        />
+      </ErrorBoundary>
     </Animated.View>
   );
 });
@@ -1507,6 +1596,11 @@ const styles = StyleSheet.create({
   gameCardFocused: {
     borderColor: 'rgba(255, 255, 255, 0)',
     backgroundColor: 'rgba(40, 50, 70, 0)',
+  },
+  // Fondo equivalente al que aplicaba <BlurView intensity={10} tint="dark">
+  // mismo tinte, pero sin backdrop-filter (que es lo que costaba caro).
+  gameCardFlat: {
+    backgroundColor: 'rgba(25, 25, 25, 0.078)',
   },
   imageContainer: {
     width: '100%',

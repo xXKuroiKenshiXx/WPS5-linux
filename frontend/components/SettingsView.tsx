@@ -19,7 +19,7 @@ import {
   View,
   useWindowDimensions
 } from 'react-native';
-import Animated, { FadeIn, FadeOut } from 'react-native-reanimated';
+import Animated, { Easing, FadeIn, FadeOut, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { toastService } from '../services/toastService';
 import { syncProfileMediaToOnline } from '../services/onlineAccountService';
 import {
@@ -79,6 +79,33 @@ const OVERLAY_COMBO_OPTIONS = [
   { id: 'L2_R2_START', labelKey: 'settings.comboL2R2Start' },
 ] as const;
 
+// Mapeo de índice de botón (Gamepad API) a nombre legible
+const GAMEPAD_BUTTON_NAMES: Record<number, string> = {
+  0: 'A/×',
+  1: 'B/○',
+  2: 'X/□',
+  3: 'Y/△',
+  4: 'L1',
+  5: 'R1',
+  6: 'L2',
+  7: 'R2',
+  8: 'Select/Share',
+  9: 'Start/Options',
+  10: 'L3',
+  11: 'R3',
+  12: 'D↑',
+  13: 'D↓',
+  14: 'D←',
+  15: 'D→',
+  16: 'Guía / PS',
+};
+
+function formatCustomCombo(combo: string): string {
+  if (!combo?.startsWith('RAW:')) return combo;
+  const indices = combo.substring(4).split(',').map(Number);
+  return indices.map(i => GAMEPAD_BUTTON_NAMES[i] ?? `Btn${i}`).join(' + ');
+}
+
 // Tipo de filtro de la sección Splash Videos: los tipos que soporta la API de
 // SteamDeckRepo, más un pseudo-tipo local 'downloaded' que no viaja a la API
 // y en su lugar muestra los videos que el usuario ya descargó anteriormente.
@@ -121,6 +148,32 @@ function applyLauncherBehaviorToElectron(behavior: LauncherPlayBehavior) {
     (window as any).electronAPI.setLauncherPlayBehavior(behavior);
   }
 }
+
+// Modos de alto refresco.
+//
+// 'auto' (por defecto): Chromium ya limita el frame rate a la frecuencia de
+// refresco del monitor, asi que en un panel de 165 Hz se renderiza a 165 fps
+// sin tocar nada.
+//
+// 'on': aplica el switch 'disable-frame-rate-limit' de Chromium, que elimina
+// el limite de frames. Solo hace falta en los setups en los que Chromium se
+// queda enganchado a 60 Hz (drivers o configuracion de multi-monitor), y
+// multiplica el consumo de CPU, asi que no se activa por defecto.
+//
+// El switch solo se puede aplicar al arrancar el proceso: cualquier cambio
+// aqui surte efecto al reiniciar el launcher.
+const HIGH_REFRESH_OPTIONS: { id: 'auto' | 'on'; label: string; desc: string }[] = [
+  {
+    id: 'auto',
+    label: 'Auto (recommended)',
+    desc: 'Follow the monitor refresh rate (165 fps on a 165 Hz screen)',
+  },
+  {
+    id: 'on',
+    label: 'Uncapped',
+    desc: 'Remove the frame rate limit. Only if the FPS counter shows 60 fps on a high refresh monitor (uses more CPU)',
+  },
+];
 
 // Valores por defecto estables: un `[]` nuevo en cada render invalidaría los useMemo.
 const NO_GAMES: any[] = [];
@@ -207,6 +260,37 @@ export default function SettingsView({
   const [systemLeftIndex, setSystemLeftIndex] = useState(0);
   const [systemFocusArea, setSystemFocusArea] = useState<'left' | 'right'>('left');
 
+  // ── Transición del borde giratorio al cambiar de fila ─────────────────────
+  // IMPORTANTE: estos hooks viven en el CUERPO del componente, nunca dentro
+  // de renderMainScreen(). renderMainScreen() solo se ejecuta cuando la
+  // pantalla es visible, así que si los hooks vivieran ahí el número de hooks
+  // cambiaría entre renders (56 al montar, 57 al abrir Ajustes) y React
+  // lanzaría "Rendered more hooks than during the previous render".
+  const spinningBorderOpacity = useSharedValue(1);
+  const prevMainFocusIndexRef = useRef(mainFocusIndex);
+
+  useEffect(() => {
+    if (prevMainFocusIndexRef.current !== mainFocusIndex && prevMainFocusIndexRef.current !== -1) {
+      // Desaparece el borde de la fila anterior.
+      spinningBorderOpacity.value = withTiming(0, {
+        duration: 200,
+        easing: Easing.in(Easing.quad),
+      });
+      // Y aparece el de la nueva con un pequeño retardo.
+      setTimeout(() => {
+        spinningBorderOpacity.value = withTiming(1, {
+          duration: 300,
+          easing: Easing.out(Easing.quad),
+        });
+      }, 100);
+    }
+    prevMainFocusIndexRef.current = mainFocusIndex;
+  }, [mainFocusIndex]);
+
+  const spinningBorderStyle = useAnimatedStyle(() => ({
+    opacity: spinningBorderOpacity.value,
+  }));
+
   // HDMI toggles state for System sub-screen
   const [hdmiDeviceLink, setHdmiDeviceLink] = useState(true);
   const [hdmiHdcp, setHdmiHdcp] = useState(false);
@@ -214,6 +298,11 @@ export default function SettingsView({
   // GPU / Hardware Acceleration info
   const [gpuInfo, setGpuInfo] = useState<any>(null);
   const [gpuLoading, setGpuLoading] = useState(false);
+
+  // Info de displays / frecuencia de refresco (alto refresco)
+  const [displayInfo, setDisplayInfo] = useState<any>(null);
+  const [displayLoading, setDisplayLoading] = useState(false);
+  const displayInfoRequestedRef = useRef(false);
 
   // Splash Videos (SteamDeckRepo) state
   const [splashQuery, setSplashQuery] = useState('');
@@ -271,6 +360,9 @@ export default function SettingsView({
   // botón enfocado dentro del modal (Usar en Boot / Usar en Suspend / Quitar).
   const [splashPreviewPost, setSplashPreviewPost] = useState<SteamDeckRepoPost | null>(null);
   const [splashModalFocusIndex, setSplashModalFocusIndex] = useState(0);
+
+  // ── Captura de combo de mando para el overlay ──────────────────────────────
+  const [captureState, setCaptureState] = useState<'idle' | 'capturing' | 'captured' | 'error'>('idle');
 
   // Guarda (o actualiza) un post en el historial local de descargas y lo
   // persiste en localStorage.
@@ -612,7 +704,7 @@ export default function SettingsView({
     if (accessibilityLeftIndex === 4) return 1; // RetroAchievements: 2 inputs
     if (accessibilityLeftIndex === 5) return 7; // Smart Sync: 8 campos
     if (accessibilityLeftIndex === 6) return 1; // Panel del juego: 2 toggles
-    if (accessibilityLeftIndex === 7) return 1; // Overlay: toggle + combo
+    if (accessibilityLeftIndex === 7) return 2; // Overlay: 0=toggle, 1=presets, 2=capturar custom
     if (accessibilityLeftIndex === 8) return 0; // Splash Videos: navegación por mouse/touch en la grilla
     return 0;
   };
@@ -630,6 +722,26 @@ export default function SettingsView({
     applyOverlaySettingsToElectron(nextEnabled, nextCombo);
   };
 
+  // Captura interactiva: lanza xinput-watcher en modo --capture y aplica el combo
+  const captureCombo = async () => {
+    if (captureState === 'capturing') return;
+    setCaptureState('capturing');
+    try {
+      const result = await (window as any).electronAPI?.captureOverlayCombo?.();
+      if (result?.success && result.combo) {
+        persistOverlaySettings({ overlayCombo: result.combo });
+        setCaptureState('captured');
+        setTimeout(() => setCaptureState('idle'), 2500);
+      } else {
+        setCaptureState('error');
+        setTimeout(() => setCaptureState('idle'), 3000);
+      }
+    } catch {
+      setCaptureState('error');
+      setTimeout(() => setCaptureState('idle'), 3000);
+    }
+  };
+
   const persistLauncherBehavior = (behavior: LauncherPlayBehavior) => {
     updateUser({
       settings: {
@@ -638,6 +750,24 @@ export default function SettingsView({
       } as any,
     });
     applyLauncherBehaviorToElectron(behavior);
+  };
+
+  // ── Alto refresco (elimina el tope de 60 fps de Chromium) ───────────────
+  const persistHighRefreshMode = (mode: 'auto' | 'on' | 'off') => {
+    if (Platform.OS === 'web' && (window as any).electronAPI?.setHighRefreshMode) {
+      (window as any).electronAPI
+        .setHighRefreshMode(mode)
+        .then((result: any) => {
+          if (result?.success) {
+            setDisplayInfo((prev: any) => ({
+              ...(prev || {}),
+              highRefreshMode: result.highRefreshMode,
+              highRefreshApplied: result.highRefreshMode !== 'off',
+            }));
+          }
+        })
+        .catch(() => { });
+    }
   };
 
   const activateAccessibilityRightItem = () => {
@@ -783,6 +913,8 @@ export default function SettingsView({
         const curIdx = OVERLAY_COMBO_OPTIONS.findIndex((opt) => opt.id === overlayCombo);
         const next = OVERLAY_COMBO_OPTIONS[(curIdx + 1) % OVERLAY_COMBO_OPTIONS.length];
         persistOverlaySettings({ overlayCombo: next.id });
+      } else if (subFocusIndex === 2) {
+        captureCombo();
       }
       return;
     }
@@ -799,6 +931,7 @@ export default function SettingsView({
     if (systemLeftIndex === 1) return 1; // HDMI toggles
     if (systemLeftIndex === 2) return Math.max(0, LANGUAGE_OPTIONS.length - 1);
     if (systemLeftIndex === 4) return LAUNCHER_BEHAVIOR_OPTIONS.length - 1; // Comportamiento del launcher
+    if (systemLeftIndex === 5) return HIGH_REFRESH_OPTIONS.length; // 3 modos + toggle del contador de fps
     return 0;
   };
 
@@ -812,6 +945,20 @@ export default function SettingsView({
     } else if (systemLeftIndex === 4) {
       const opt = LAUNCHER_BEHAVIOR_OPTIONS[subFocusIndex];
       if (opt) persistLauncherBehavior(opt.id);
+    } else if (systemLeftIndex === 5) {
+      // Las tres primeras filas son los modos de alto refresco; la cuarta
+      // activa/desactiva el contador de fps.
+      if (subFocusIndex === HIGH_REFRESH_OPTIONS.length) {
+        updateUser({
+          settings: {
+            ...activeUser?.settings,
+            showFpsCounter: !activeUser?.settings?.showFpsCounter,
+          } as any,
+        });
+      } else {
+        const opt = HIGH_REFRESH_OPTIONS[subFocusIndex];
+        if (opt) persistHighRefreshMode(opt.id);
+      }
     }
   };
 
@@ -1250,7 +1397,11 @@ export default function SettingsView({
                   {...(Platform.OS === 'web' ? { onMouseEnter: () => setMainFocusIndex(index) } : {}) as any}
                   onPress={item.onPress}
                 >
-                  {isFocused && <SpinningBorderSearch size={s(180)} spread={1} borderRadius={0} />}
+                  {isFocused && (
+                    <Animated.View style={[styles.spinningBorderContainer, spinningBorderStyle]}>
+                      <SpinningBorderSearch size={s(180)} spread={1} borderRadius={0} />
+                    </Animated.View>
+                  )}
                   <View style={styles.psMenuRowLeft}>
                     {item.id === 'users_and_accounts' && userAvatarUri ? (
                       <Image
@@ -2037,8 +2188,64 @@ export default function SettingsView({
                           </TouchableOpacity>
                         );
                       })}
+                      {overlayCombo.startsWith('RAW:') && (
+                        <View style={[styles.platformBtn, styles.platformBtnActive]}>
+                          <Text style={[styles.platformBtnText, styles.platformBtnTextActive]}>
+                            {formatCustomCombo(overlayCombo)}
+                          </Text>
+                        </View>
+                      )}
                     </View>
                   </View>
+
+                  {/* Fila 2: Mapeo interactivo personalizado */}
+                  {Platform.OS === 'web' && (window as any).electronAPI?.captureOverlayCombo && (
+                    <View
+                      style={[
+                        styles.toggleRowSection,
+                        { alignItems: 'center' },
+                        isRightFocused && subFocusIndex === 2 && styles.rightItemFocused,
+                      ]}
+                    >
+                      {isRightFocused && subFocusIndex === 2 && <SpinningBorderSettings size={s(180)} spread={0.5} borderRadius={0} />}
+                      <View style={{ flex: 1, paddingRight: 20 }}>
+                        <Text style={styles.toggleRowTitle}>{t('settings.customMapping')}</Text>
+                        <Text style={styles.toggleRowDesc}>{t('settings.captureComboDesc')}</Text>
+                      </View>
+                      <View style={{ alignItems: 'flex-end', minWidth: 220 }}>
+                        <TouchableOpacity
+                          style={[
+                            styles.platformBtn,
+                            { paddingHorizontal: 16, paddingVertical: 10 },
+                            overlayCombo.startsWith('RAW:') && styles.platformBtnActive,
+                            captureState === 'capturing' && { opacity: 0.85, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.2)' },
+                            captureState === 'captured' && { borderColor: '#10b981', backgroundColor: 'rgba(16,185,129,0.2)' },
+                            captureState === 'error' && { borderColor: '#ef4444', backgroundColor: 'rgba(239,68,68,0.2)' },
+                          ]}
+                          onPress={captureCombo}
+                          disabled={captureState === 'capturing'}
+                        >
+                          <Text style={[
+                            styles.platformBtnText,
+                            overlayCombo.startsWith('RAW:') && styles.platformBtnTextActive,
+                            captureState === 'capturing' && { color: '#60a5fa' },
+                            captureState === 'captured' && { color: '#34d399' },
+                            captureState === 'error' && { color: '#f87171' },
+                          ]}>
+                            {captureState === 'capturing'
+                              ? t('settings.captureComboPressButtons')
+                              : captureState === 'captured'
+                                ? `${t('settings.comboCaptured')}: ${formatCustomCombo(overlayCombo)}`
+                                : captureState === 'error'
+                                  ? t('settings.comboCaptureError')
+                                  : overlayCombo.startsWith('RAW:')
+                                    ? `🎮 ${formatCustomCombo(overlayCombo)}`
+                                    : `🎮 ${t('settings.captureCombo')}`}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  )}
                 </ScrollView>
               );
             })()}
@@ -2473,6 +2680,23 @@ export default function SettingsView({
       }).catch(() => setGpuLoading(false));
     }
 
+    // Load display / refresh-rate info for the same section.
+    // El ref evita volver a pedirlo en cada render (y evita un bucle de
+    // render-phase updates cuando el launcher corre fuera de Electron).
+    if (systemLeftIndex === 5 && !displayInfo && !displayLoading && !displayInfoRequestedRef.current) {
+      const displayApi = (window as any).electronAPI;
+      if (displayApi?.getDisplayInfo) {
+        displayInfoRequestedRef.current = true;
+        setDisplayLoading(true);
+        displayApi.getDisplayInfo()
+          .then((info: any) => {
+            setDisplayInfo(info);
+            setDisplayLoading(false);
+          })
+          .catch(() => setDisplayLoading(false));
+      }
+    }
+
     const currentLauncherBehavior: LauncherPlayBehavior =
       (activeUser?.settings as any)?.launcherPlayBehavior || 'hide';
 
@@ -2726,9 +2950,101 @@ export default function SettingsView({
               const isAccelerated = summary?.hardwareAccelerated;
               // Si el handler falló ({ success: false }) no hay datos: "Unavailable", no "Inactive".
               const gpuFailed = !!gpuInfo && !gpuData;
+              const refreshRate = displayInfo?.primaryRefreshRate || 0;
+              const highRefreshMode: 'auto' | 'on' =
+                displayInfo?.highRefreshMode === 'on' ? 'on' : 'auto';
+              const highRefreshApplied = highRefreshMode === 'on';
+              const showFpsCounter = !!activeUser?.settings?.showFpsCounter;
               return (
                 <ScrollView showsVerticalScrollIndicator={false}>
                   <Text style={styles.rightSectionTitle}>GPU & Performance</Text>
+
+                  {/* ── Display & Frame Rate ───────────────────────────────── */}
+                  <Text style={[styles.rightSectionTitle, { marginTop: 18, fontSize: 13 }]}>
+                    Display &amp; Frame Rate
+                  </Text>
+
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoRowLabel}>Display Refresh Rate</Text>
+                    <Text style={styles.infoRowValue}>
+                      {displayLoading ? 'Checking…' : refreshRate ? `${refreshRate} Hz` : 'Unknown'}
+                    </Text>
+                  </View>
+
+                  <View style={styles.infoRow}>
+                    <Text style={styles.infoRowLabel}>Frame Rate</Text>
+                    <Text
+                      style={[
+                        styles.infoRowValue,
+                        { color: highRefreshApplied ? '#FFB84D' : '#00D478' },
+                      ]}
+                    >
+                      {highRefreshApplied
+                        ? 'Uncapped'
+                        : refreshRate
+                          ? `Follows the monitor (${refreshRate} Hz)`
+                          : 'Follows the monitor'}
+                    </Text>
+                  </View>
+
+                  <Text style={{ color: '#888', fontSize: 11, marginTop: 2, marginBottom: 8 }}>
+                    {highRefreshApplied
+                      ? 'The frame rate limit is disabled: the launcher renders as fast as it can. This uses considerably more CPU.'
+                      : "The launcher renders at the monitor's refresh rate. Enable the FPS counter below to check the real frame rate."}
+                  </Text>
+
+                  {HIGH_REFRESH_OPTIONS.map((opt, optIdx) => {
+                    const isRowFocused = systemFocusArea === 'right' && subFocusIndex === optIdx;
+                    const isActive = highRefreshMode === opt.id;
+                    return (
+                      <View
+                        key={opt.id}
+                        style={[
+                          styles.toggleRowSection,
+                          isRowFocused && styles.rightItemFocused,
+                        ]}
+                      >
+                        {isRowFocused && <SpinningBorderSettings size={s(160)} spread={1} borderRadius={8} />}
+                        <View style={{ flex: 1, paddingRight: 20 }}>
+                          <Text style={styles.toggleRowTitle}>{opt.label}</Text>
+                          <Text style={styles.toggleRowDesc}>{opt.desc}</Text>
+                        </View>
+                        {isActive && <Ionicons name="checkmark-circle" size={22} color="#00D478" />}
+                      </View>
+                    );
+                  })}
+
+                  {/* Contador de fps en vivo */}
+                  <View
+                    style={[
+                      styles.toggleRowSection,
+                      systemFocusArea === 'right' &&
+                        subFocusIndex === HIGH_REFRESH_OPTIONS.length &&
+                        styles.rightItemFocused,
+                    ]}
+                  >
+                    {systemFocusArea === 'right' &&
+                      subFocusIndex === HIGH_REFRESH_OPTIONS.length && (
+                        <SpinningBorderSettings size={s(160)} spread={1} borderRadius={8} />
+                      )}
+                    <View style={{ flex: 1, paddingRight: 20 }}>
+                      <Text style={styles.toggleRowTitle}>Show FPS Counter</Text>
+                      <Text style={styles.toggleRowDesc}>
+                        Live frame rate overlay in the top-left corner
+                      </Text>
+                    </View>
+                    <View style={[styles.psSwitch, showFpsCounter && styles.psSwitchActive]}>
+                      <View
+                        style={[styles.psSwitchThumb, showFpsCounter && styles.psSwitchThumbActive]}
+                      />
+                    </View>
+                  </View>
+
+                  {highRefreshMode === 'on' && (
+                    <Text style={{ color: '#FFD166', fontSize: 11, marginTop: 4 }}>
+                      Restart the launcher to apply this change.
+                    </Text>
+                  )}
 
                   {/* Hardware Acceleration Status Badge */}
                   <View
@@ -3195,6 +3511,16 @@ const createStyles = (s: ScaleFn) => StyleSheet.create({
   psMenuRowFocused: {
     backgroundColor: 'rgba(255, 255, 255, 0.08)',
     //borderColor: 'rgba(255, 255, 255, 0.9)',
+  },
+  // Contenedor del borde giratorio: se posiciona sobre la fila (inset 0) para
+  // poder animar su opacidad sin mover el resto del layout.
+  spinningBorderContainer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    pointerEvents: 'none',
   },
   psMenuRowLeft: {
     flexDirection: 'row',
